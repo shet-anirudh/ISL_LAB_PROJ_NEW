@@ -1,0 +1,42 @@
+{
+  "measurements": {
+    "audio": {
+      "aes_decrypt_median_ms": 0.0348,
+      "aes_decrypt_mib_per_s": 2208.905,
+      "aes_encrypt_median_ms": 0.076,
+      "aes_encrypt_mib_per_s": 1012.803,
+      "bytes": 80685,
+      "file": "03_Media/briefing.mp3",
+      "rsa_wrap_median_ms": 0.0661
+    },
+    "document": {
+      "aes_decrypt_median_ms": 0.0124,
+      "aes_decrypt_mib_per_s": 419.819,
+      "aes_encrypt_median_ms": 0.0202,
+      "aes_encrypt_mib_per_s": 257.208,
+      "bytes": 5443,
+      "file": "01_Operations/report.pdf",
+      "rsa_wrap_median_ms": 0.0713
+    },
+    "image": {
+      "aes_decrypt_median_ms": 0.018,
+      "aes_decrypt_mib_per_s": 1914.538,
+      "aes_encrypt_median_ms": 0.0419,
+      "aes_encrypt_mib_per_s": 823.771,
+      "bytes": 36219,
+      "file": "02_Intelligence/marker.jpg",
+      "rsa_wrap_median_ms": 0.0637
+    },
+    "video": {
+      "aes_decrypt_median_ms": 0.0124,
+      "aes_decrypt_mib_per_s": 482.123,
+      "aes_encrypt_median_ms": 0.0194,
+      "aes_encrypt_mib_per_s": 306.778,
+      "bytes": 6248,
+      "file": "03_Media/training.mp4",
+      "rsa_wrap_median_ms": 0.0629
+    }
+  },
+  "trials_per_file": 10,
+  "ts": "2026-10-29T05:25:05.466+00:00"
+}
