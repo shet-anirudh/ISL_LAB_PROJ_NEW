@@ -1,4 +1,4 @@
-"""Launch the Kali-side read-only attack activity dashboard."""
+"""Launch the Kali-side tabbed dashboard with controlled synthetic actions."""
 
 from shared.dashboard import main
 

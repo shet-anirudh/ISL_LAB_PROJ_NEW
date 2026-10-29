@@ -1,7 +1,7 @@
-"""Kali-side one-command C2 handshake for the synthetic lab.
+"""Kali-side one-command signed C2 handshake for the synthetic lab.
 
 Start on Kali before the victim client: python3 -m attacker.c2_server --cmd PING
-The victim logs/acknowledges commands but does not execute attack actions yet.
+The armed victim agent can run only the existing controlled synthetic actions.
 """
 
 import argparse
@@ -11,12 +11,12 @@ from config import ATTACKER_IP, AUTH_MODE, C2_PORT, VICTIM_IP
 from shared.c2_protocol import log_event, pack, unpack
 
 
-def serve_once(command, unsigned=False):
+def serve_once(command, unsigned=False, *, accept_timeout=300):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((ATTACKER_IP, C2_PORT))
         server.listen(1)
-        server.settimeout(300)
+        server.settimeout(accept_timeout)
         print(f"C2 listening on {ATTACKER_IP}:{C2_PORT}; auth={AUTH_MODE}", flush=True)
         connection, peer = server.accept()
         with connection:
@@ -32,6 +32,7 @@ def serve_once(command, unsigned=False):
             log_event("response_received", role="attacker", cmd=answer["cmd"],
                       requested=command, data=answer["data"])
             print(f"Victim response: {answer['cmd']} {answer['data']}", flush=True)
+            return answer
 
 
 def serve_relay_once():

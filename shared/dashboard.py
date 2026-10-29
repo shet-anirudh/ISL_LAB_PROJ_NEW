@@ -65,12 +65,21 @@ class ActionController:
                 if not captures:
                     raise FileNotFoundError("No Kali PCAP found in results/pcap")
                 capture = max(captures, key=lambda p: p.stat().st_mtime_ns)
+                report_name = None
                 for module in ("analysis.pcap_parser", "analysis.forensic_report"):
                     result = subprocess.run([sys.executable, "-m", module, str(capture)],
                                             cwd=ROOT, capture_output=True, text=True, timeout=60)
                     if result.returncode:
                         raise RuntimeError(f"{module}: {(result.stderr or result.stdout)[-180:]}")
-                detail, state = f"Analyzed {capture.name} and generated forensic report", "completed"
+                    if module == "analysis.forensic_report":
+                        prefix = "PASS: forensic report saved to "
+                        names = [line[len(prefix):].strip() for line in result.stdout.splitlines()
+                                 if line.startswith(prefix)]
+                        if names:
+                            report_name = Path(names[-1]).name
+                if not report_name:
+                    raise RuntimeError("Forensic report completed without a saved report path")
+                detail, state = f"Analyzed {capture.name}; report: {report_name}", "completed"
             elif command == "VERIFY_SIGNATURE":
                 signatures = [p for p in (ROOT / "results" / "signatures").glob("*.sig.json")
                               if p.is_file() and not p.is_symlink()]
@@ -262,16 +271,15 @@ def _security_data():
 
 def _reports():
     results = ROOT / "results"
-    patterns = ("security_summary_*.md", "reports/*_forensic_*.md")
+    files = [p for pattern in ("security_summary_*.md", "reports/*.md")
+             for p in results.glob(pattern) if p.is_file() and not p.is_symlink()]
     output = []
-    for pattern in patterns:
-        files = [p for p in results.glob(pattern) if p.is_file() and not p.is_symlink()]
-        if files:
-            latest = max(files, key=lambda p: p.stat().st_mtime_ns)
-            try:
-                output.append({"name": latest.name, "text": latest.read_text(encoding="utf-8")[:12000]})
-            except (OSError, UnicodeError):
-                pass
+    for path in sorted(files, key=lambda p: p.stat().st_mtime_ns, reverse=True)[:8]:
+        try:
+            output.append({"name": path.name, "kind": "Forensic" if path.parent.name == "reports" else "Security",
+                           "text": path.read_text(encoding="utf-8")[:12000]})
+        except (OSError, UnicodeError):
+            pass
     return output
 
 
@@ -436,6 +444,7 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 .measure-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}.measure-grid h3{margin:12px 0;font-size:15px}.measure-grid pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1727;border:1px solid #294059;border-radius:10px;padding:12px;max-height:170px;overflow:auto;font-size:12px}.previews{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}.previews img{width:100%;height:auto;aspect-ratio:4/3;object-fit:contain;background:#0b1727;border:1px solid #294059;border-radius:9px}.previews figure{margin:0}.previews figcaption{font-size:12px;color:#a6b8cb;margin-top:7px}.measure-note{color:#9badbf;font-size:12px;line-height:1.5}
 .tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}.tabs button,.action-button{font:inherit;cursor:pointer;border:1px solid #386079;border-radius:10px;color:#b9d5e6;background:#1b3248;padding:10px 14px}.tabs button[aria-selected="true"]{background:#24645e;border-color:#49c9ad;color:#fff}.tab-view[hidden],.tabs button[hidden]{display:none}.tab-view{margin-top:14px}.tab-view>.panel{margin-top:14px}.action-buttons{display:flex;flex-wrap:wrap;gap:12px}.action-button{background:#215b55;border-color:#48b9a7}.action-button:disabled{opacity:.5;cursor:wait}.action-status{margin-top:18px;padding:16px;background:#0c1b2d;border-radius:10px;min-height:70px}.tab-view audio{width:100%;margin:12px 0 18px}
 .tab-view pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1727;border:1px solid #294059;border-radius:10px;padding:12px;max-height:500px;overflow:auto;font-size:12px}
+.report-list{display:flex;flex-wrap:wrap;gap:9px;margin:0 0 18px}.report-list button{font:inherit;cursor:pointer;border:1px solid #386079;background:#183149;color:#c4dbe9;border-radius:9px;padding:8px 11px}.report-list button[aria-selected="true"]{border-color:#49c9ad;background:#24645e;color:#fff}
 @media(max-width:850px){.cards{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.wide{grid-column:auto}}@media(max-width:520px){.cards{grid-template-columns:1fr 1fr}.card{padding:14px}.value{font-size:27px}main{padding:20px 14px}.pill{display:none}}
 </style></head><body><main>
 <header><div><div class="eyebrow">IS Lab · Synthetic Environment</div><h1 id="title">Dashboard</h1><div class="muted" id="updated">Loading local evidence…</div></div><span class="pill" id="mode-pill">LAB VM</span></header>
@@ -467,6 +476,7 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 const ACTION_TOKEN='__ACTION_TOKEN__';
 const $=id=>document.getElementById(id);
 let activeTab='overview',role='victim';
+let selectedReport=null;
 function showTab(name){
   if(name==='controls'&&role!=='attacker')name='overview';
   activeTab=name;
@@ -483,6 +493,20 @@ function measurement(container,label,value,max,unit){
 }
 function metricRow(container,label,value){const row=el('div','row');row.append(el('span','',label),el('span','',value));container.append(row)}
 function section(parent,title){const box=el('div','');box.append(el('h3','',title));parent.append(box);return box}
+function renderReports(items){
+  const root=$('reports');root.replaceChildren();
+  if(!items.length){root.append(el('p','muted','No generated report is available on this VM.'));return}
+  if(!items.some(item=>item.name===selectedReport))selectedReport=items[0].name;
+  const list=el('div','report-list');
+  for(const item of items){
+    const button=el('button','',item.kind+' · '+item.name);
+    button.setAttribute('aria-selected',String(item.name===selectedReport));
+    button.addEventListener('click',()=>{selectedReport=item.name;renderReports(items)});
+    list.append(button);
+  }
+  const current=items.find(item=>item.name===selectedReport);
+  root.append(list,el('pre','',current.text));
+}
 let lastSecurity='';
 function drawSecurity(data){
   const sec=data.security||{},text=sec.text||{},hash=sec.hash||{},im=sec.image||{},audio=sec.audio||{},ev=sec.evaluation||{},sig=sec.signature||{},crypto=sec.crypto||{};
@@ -579,7 +603,7 @@ const visual=$('visual');visual.replaceChildren();
 if(data.role==='victim'){$('chart-title').textContent='Latest encryption trial';const t=data.trial;if(!t){visual.append(el('p','muted','No local simulator trial found.'))}else{for(const [label,n,cls] of [['Decoy copies',t.decoy,''],['Real copies',t.real,'real']]){const wrap=el('div','');const head=el('div','barhead');head.append(el('span','',label),el('strong','',n));const track=el('div','track');const fill=el('div','fill '+cls);fill.style.width=Math.min(100,n/10*100)+'%';track.append(fill);wrap.append(head,track);visual.append(wrap)}visual.append(el('p','muted',t.name+(t.complete?' · completed':' · interrupted or in progress')))}}
 else{$('chart-title').textContent='Local recovered files';if(!data.files.length)visual.append(el('p','muted','No received files yet.'));for(const f of data.files){const row=el('div','row');row.append(el('span','',f.name),el('span',f.valid?'ok':'bad',(f.valid?'SHA-256 verified':'Unverified')+' · '+f.bytes.toLocaleString()+' bytes'));visual.append(row)}}
 const table=$('events');table.replaceChildren();for(const event of data.events){const tr=el('tr','');for(const field of ['ts','module','event','detail'])tr.append(el('td','',event[field]));table.append(tr)}if(!data.events.length){const tr=el('tr','');const td=el('td','muted','No recorded events yet.');td.colSpan=4;tr.append(td);table.append(tr)}
-const reports=$('reports');reports.replaceChildren();for(const report of data.reports||[]){const box=section(reports,report.name);box.append(el('pre','',report.text))}if(!reports.children.length)reports.append(el('p','muted','No generated report is available on this VM.'));
+renderReports(data.reports||[]);
 drawSecurity(data)}
 async function refresh(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);draw(await response.json())}catch(error){$('updated').textContent='Dashboard data unavailable: '+error.message}}
 async function refreshAction(){
@@ -588,8 +612,12 @@ async function refreshAction(){
     const response=await fetch('/api/action/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);
     const state=await response.json();$('action-status').textContent=(state.command||'Lab controls')+' · '+state.status+' · '+state.detail;
     for(const button of document.querySelectorAll('[data-action]'))button.disabled=state.status==='running';
+    if(state.command==='ANALYZE_PCAP'&&state.status==='completed'&&state.finished!==lastReportAction){
+      lastReportAction=state.finished;selectedReport=null;await refresh();
+    }
   }catch(error){$('action-status').textContent='Action status unavailable: '+error.message}
 }
+let lastReportAction=null;
 for(const button of document.querySelectorAll('[data-action]'))button.addEventListener('click',async()=>{
   button.disabled=true;$('action-status').textContent='Starting '+button.dataset.action+'…';
   try{
