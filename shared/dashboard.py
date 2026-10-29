@@ -1,14 +1,18 @@
-"""Read-only local dashboard for the synthetic lab's attacker and victim VMs.
+"""Local dashboards for the synthetic lab's attacker and victim VMs.
 
 Launch through ``python3 -m attacker.dashboard`` on Kali or
-``python3 -m victim.dashboard`` on Ubuntu. No attack actions are exposed.
+``python3 -m victim.dashboard`` on Ubuntu. Victim status is read-only; Kali's
+local dashboard can queue only signed, controlled synthetic C2 actions.
 """
 
 import argparse
 import hashlib
 import hmac
 import json
+import secrets
 import ssl
+import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +28,108 @@ LOGS = Path(LOG_DIR)
 MAX_LOG_BYTES = 2 * 1024 * 1024
 MAX_EVENTS = 24
 TELEMETRY_PORT = 9083
+
+
+class ActionController:
+    """At most one local, allowlisted C2 action at a time."""
+
+    ALLOWED = {"PING", "START_ENCRYPT", "START_EXFIL", "ANALYZE_PCAP", "VERIFY_SIGNATURE"}
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.state = {"status": "idle", "command": None, "detail": "No action run yet"}
+
+    def status(self):
+        with self.lock:
+            return dict(self.state)
+
+    def start(self, command):
+        if command not in self.ALLOWED:
+            raise ValueError("Action is not in the synthetic command allowlist")
+        with self.lock:
+            if self.state["status"] == "running":
+                raise RuntimeError("An action is already running")
+            self.state = {"status": "running", "command": command,
+                          "detail": "Running local analysis" if command in {"ANALYZE_PCAP", "VERIFY_SIGNATURE"}
+                          else "Waiting for the victim lab agent", "started": _now()}
+        threading.Thread(target=self._run, args=(command,), daemon=True).start()
+        return self.status()
+
+    def _run(self, command):
+        receiver_thread = None
+        receiver_result = {}
+        try:
+            if command == "ANALYZE_PCAP":
+                captures = [p for p in (ROOT / "results" / "pcap").glob("*.pcapng")
+                            if p.is_file() and not p.is_symlink()]
+                if not captures:
+                    raise FileNotFoundError("No Kali PCAP found in results/pcap")
+                capture = max(captures, key=lambda p: p.stat().st_mtime_ns)
+                for module in ("analysis.pcap_parser", "analysis.forensic_report"):
+                    result = subprocess.run([sys.executable, "-m", module, str(capture)],
+                                            cwd=ROOT, capture_output=True, text=True, timeout=60)
+                    if result.returncode:
+                        raise RuntimeError(f"{module}: {(result.stderr or result.stdout)[-180:]}")
+                detail, state = f"Analyzed {capture.name} and generated forensic report", "completed"
+            elif command == "VERIFY_SIGNATURE":
+                signatures = [p for p in (ROOT / "results" / "signatures").glob("*.sig.json")
+                              if p.is_file() and not p.is_symlink()]
+                if not signatures:
+                    raise FileNotFoundError("No committed signature result found")
+                newest = max(signatures, key=lambda p: p.stat().st_mtime_ns)
+                source = _json_file(newest, {}).get("source")
+                if not isinstance(source, str) or not source.startswith("results/defense_evaluation_"):
+                    raise ValueError("Signature record does not identify a synthetic evaluation")
+                result = subprocess.run([sys.executable, "-m", "tests.signature_demo", "--verify", source],
+                                        cwd=ROOT, capture_output=True, text=True, timeout=20)
+                if result.returncode:
+                    raise RuntimeError((result.stderr or result.stdout)[-180:])
+                detail, state = f"Verified RSA-PSS signature for {Path(source).name}", "completed"
+            else:
+                if command == "START_EXFIL":
+                    from attacker.transfer_receiver import receive_once
+
+                    ready = threading.Event()
+
+                    def receive():
+                        try:
+                            receiver_result["record"] = receive_once(
+                                ready=ready, accept_timeout=25)
+                        except Exception as exc:
+                            receiver_result["error"] = str(exc)[:180]
+                            ready.set()
+
+                    receiver_thread = threading.Thread(target=receive, daemon=True)
+                    receiver_thread.start()
+                    if not ready.wait(timeout=3) or "error" in receiver_result:
+                        raise RuntimeError(receiver_result.get("error", "Transfer receiver did not start"))
+                from attacker.c2_server import serve_once
+                response = serve_once(command, accept_timeout=20)
+                if response["cmd"] != "ACK":
+                    raise RuntimeError(f"Victim rejected {command}: {response['data']}")
+                data = response["data"]
+                if command == "START_ENCRYPT" and not (data.get("executed") and data.get("contained")):
+                    raise RuntimeError("Victim did not confirm copy-only containment")
+                if command == "START_EXFIL":
+                    receiver_thread.join(timeout=28)
+                    if "error" in receiver_result or receiver_thread.is_alive():
+                        raise RuntimeError(receiver_result.get("error", "Transfer receiver timed out"))
+                    record = receiver_result.get("record", {})
+                    if not data.get("executed") or record.get("file") != "01_Operations/report.pdf":
+                        raise RuntimeError("Verified synthetic transfer was not confirmed")
+                    detail = f"Recovered {record['file']} ({record['bytes']} bytes), SHA-256 verified"
+                elif command == "START_ENCRYPT":
+                    detail = f"Contained copy-only trial {data['trial']}"
+                else:
+                    detail = "Victim acknowledged PING (dry run)"
+                state = "completed"
+        except Exception as exc:
+            state, detail = "failed", str(exc)[:220]
+            if receiver_thread is not None and receiver_thread.is_alive():
+                receiver_thread.join(timeout=27)
+        with self.lock:
+            self.state = {"status": state, "command": command, "detail": detail,
+                          "finished": _now()}
 
 
 def _json_file(path, default):
@@ -154,6 +260,21 @@ def _security_data():
     }
 
 
+def _reports():
+    results = ROOT / "results"
+    patterns = ("security_summary_*.md", "reports/*_forensic_*.md")
+    output = []
+    for pattern in patterns:
+        files = [p for p in results.glob(pattern) if p.is_file() and not p.is_symlink()]
+        if files:
+            latest = max(files, key=lambda p: p.stat().st_mtime_ns)
+            try:
+                output.append({"name": latest.name, "text": latest.read_text(encoding="utf-8")[:12000]})
+            except (OSError, UnicodeError):
+                pass
+    return output
+
+
 def _victim():
     baseline = _baseline()
     data_root = Path(TEST_DATA_DIR)
@@ -200,10 +321,11 @@ def _victim():
             {"label": "Last containment", "value": kills[-1].get("ts", "Unknown") if kills else "None"},
             {"label": "Restore trials", "value": str(len(restore_trials)) + " isolated directories"},
             {"label": "Files sent", "value": str(sum(e.get("event") == "file_sent" for e in transfer))},
-            {"label": "C2 messages", "value": str(len(c2)) + " · dry-run commands"},
+            {"label": "C2 messages", "value": str(len(c2)) + " · signed lab and dry-run actions"},
         ],
         "events": _event_feed([honeypot, containment, simulator, transfer, c2]),
         "security": _security_data(),
+        "reports": _reports(),
     }
 
 
@@ -268,7 +390,7 @@ def _attacker():
         "cards": [
             {"label": "Recovered samples", "value": verified, "note": f"{len(recovered)} local files · baseline checked"},
             {"label": "Received transfers", "value": sum(e.get("event") == "file_received" for e in transfer), "note": "Historical verified events"},
-            {"label": "C2 responses", "value": len(responses), "note": "Commands are dry-run"},
+            {"label": "C2 responses", "value": len(responses), "note": "Signed lab commands and dry runs"},
             {"label": "Spoof attempts blocked", "value": rejects, "note": "Authenticated relay demo"},
             {"label": "Victim confirmed stops", "value": remote_info.get("stops", "—"),
              "note": "Live victim telemetry" if remote else "Victim telemetry unavailable"},
@@ -288,6 +410,7 @@ def _attacker():
         ],
         "events": _event_feed([transfer, c2, remote_events]),
         "security": remote.get("security") if remote else _security_data(),
+        "reports": _reports(),
     }
 
 
@@ -311,15 +434,46 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 .bars{display:grid;gap:18px}.barhead{display:flex;justify-content:space-between;color:#b9cddd;font-size:13px;margin-bottom:7px}.track{height:10px;border-radius:8px;background:#28384b;overflow:hidden}.fill{height:100%;border-radius:8px;background:#42c9af;transition:width .3s}.fill.real{background:#ff9878}
 .scroll{max-height:390px;overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}th{color:#8fa6ba;font-weight:650;position:sticky;top:0;background:#142235}td,th{padding:11px 9px;border-bottom:1px solid #26374a;vertical-align:top}td{overflow-wrap:anywhere}.ok{color:#65dec2}.bad{color:#ff9b83}
 .measure-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}.measure-grid h3{margin:12px 0;font-size:15px}.measure-grid pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1727;border:1px solid #294059;border-radius:10px;padding:12px;max-height:170px;overflow:auto;font-size:12px}.previews{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}.previews img{width:100%;height:auto;aspect-ratio:4/3;object-fit:contain;background:#0b1727;border:1px solid #294059;border-radius:9px}.previews figure{margin:0}.previews figcaption{font-size:12px;color:#a6b8cb;margin-top:7px}.measure-note{color:#9badbf;font-size:12px;line-height:1.5}
+.tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}.tabs button,.action-button{font:inherit;cursor:pointer;border:1px solid #386079;border-radius:10px;color:#b9d5e6;background:#1b3248;padding:10px 14px}.tabs button[aria-selected="true"]{background:#24645e;border-color:#49c9ad;color:#fff}.tab-view[hidden],.tabs button[hidden]{display:none}.tab-view{margin-top:14px}.tab-view>.panel{margin-top:14px}.action-buttons{display:flex;flex-wrap:wrap;gap:12px}.action-button{background:#215b55;border-color:#48b9a7}.action-button:disabled{opacity:.5;cursor:wait}.action-status{margin-top:18px;padding:16px;background:#0c1b2d;border-radius:10px;min-height:70px}.tab-view audio{width:100%;margin:12px 0 18px}
+.tab-view pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1727;border:1px solid #294059;border-radius:10px;padding:12px;max-height:500px;overflow:auto;font-size:12px}
 @media(max-width:850px){.cards{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.wide{grid-column:auto}}@media(max-width:520px){.cards{grid-template-columns:1fr 1fr}.card{padding:14px}.value{font-size:27px}main{padding:20px 14px}.pill{display:none}}
 </style></head><body><main>
-<header><div><div class="eyebrow">IS Lab · Synthetic Environment</div><h1 id="title">Dashboard</h1><div class="muted" id="updated">Loading local evidence…</div></div><span class="pill">READ ONLY · LAB VM</span></header>
-<section class="cards" id="cards"></section><div class="grid"><section class="panel"><h2>Activity summary</h2><div id="summary"></div></section>
+<header><div><div class="eyebrow">IS Lab · Synthetic Environment</div><h1 id="title">Dashboard</h1><div class="muted" id="updated">Loading local evidence…</div></div><span class="pill" id="mode-pill">LAB VM</span></header>
+<nav class="tabs" aria-label="Dashboard sections" id="tabs">
+<button data-tab="overview" aria-selected="true">Overview</button><button data-tab="controls" hidden>Lab controls</button>
+<button data-tab="text">Text</button><button data-tab="image">Image</button><button data-tab="audio">Audio</button>
+<button data-tab="defense">Defense</button><button data-tab="performance">Performance</button>
+<button data-tab="evidence">Hash &amp; signature</button><button data-tab="reports">Reports</button><button data-tab="events">Events</button></nav>
+<div class="tab-view" id="tab-overview"><section class="cards" id="cards"></section><div class="grid"><section class="panel"><h2>Activity summary</h2><div id="summary"></div></section>
 <section class="panel"><h2 id="chart-title">Latest trial</h2><div class="bars" id="visual"></div></section>
-<section class="panel wide" id="security-panel" hidden><h2>Security and efficiency measurements</h2><div class="measure-grid" id="security"></div></section>
-<section class="panel wide"><h2>Recent recorded events</h2><div class="scroll"><table><thead><tr><th>Time (UTC)</th><th>Module</th><th>Event</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table></div></section></div>
+</div></div>
+<div class="tab-view" id="tab-controls" hidden><section class="panel"><h2>Controlled synthetic actions</h2>
+<p class="muted">Ubuntu must run the armed lab agent. Actions use signed C2; encryption writes disposable copies and transfer sends only the fixed synthetic report.</p>
+<div class="action-buttons"><button class="action-button" data-action="PING">Ping victim</button>
+<button class="action-button" data-action="START_ENCRYPT">Run contained trial</button>
+<button class="action-button" data-action="START_EXFIL">Transfer synthetic PDF</button>
+<button class="action-button" data-action="ANALYZE_PCAP">Analyze latest PCAP</button>
+<button class="action-button" data-action="VERIFY_SIGNATURE">Verify evaluation signature</button></div>
+<div class="action-status" id="action-status" role="status">No action run yet.</div></section></div>
+<div class="tab-view" id="tab-text" hidden><section class="panel"><h2>Text encryption</h2><div id="security-text"></div></section></div>
+<div class="tab-view" id="tab-image" hidden><section class="panel"><h2>RGB image analysis</h2><div id="security-image"></div></section></div>
+<div class="tab-view" id="tab-audio" hidden><section class="panel"><h2>Audio encryption</h2><div id="security-audio"></div></section></div>
+<div class="tab-view" id="tab-defense" hidden><section class="panel"><h2>Containment evaluation</h2><div id="security-defense"></div></section></div>
+<div class="tab-view" id="tab-performance" hidden><section class="panel"><h2>Processing efficiency</h2><div id="security-performance"></div></section></div>
+<div class="tab-view" id="tab-evidence" hidden><section class="panel"><h2>Hash and signature evidence</h2><div class="measure-grid" id="security-evidence"></div></section></div>
+<div class="tab-view" id="tab-reports" hidden><section class="panel"><h2>Generated reports</h2><div id="reports"></div></section></div>
+<div class="tab-view" id="tab-events" hidden><section class="panel"><h2>Recorded events</h2><div class="scroll"><table><thead><tr><th>Time (UTC)</th><th>Module</th><th>Event</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table></div></section></div>
 </main><script>
+const ACTION_TOKEN='__ACTION_TOKEN__';
 const $=id=>document.getElementById(id);
+let activeTab='overview',role='victim';
+function showTab(name){
+  if(name==='controls'&&role!=='attacker')name='overview';
+  activeTab=name;
+  for(const button of document.querySelectorAll('#tabs button'))button.setAttribute('aria-selected',String(button.dataset.tab===name));
+  for(const pane of document.querySelectorAll('.tab-view'))pane.hidden=pane.id!=='tab-'+name;
+}
+for(const button of document.querySelectorAll('#tabs button'))button.addEventListener('click',()=>showTab(button.dataset.tab));
 function el(tag,cls,content){const node=document.createElement(tag);if(cls)node.className=cls;if(content!==undefined)node.textContent=String(content);return node}
 function measurement(container,label,value,max,unit){
   if(typeof value!=='number'||!isFinite(value))return;
@@ -333,10 +487,11 @@ let lastSecurity='';
 function drawSecurity(data){
   const sec=data.security||{},text=sec.text||{},hash=sec.hash||{},im=sec.image||{},audio=sec.audio||{},ev=sec.evaluation||{},sig=sec.signature||{},crypto=sec.crypto||{};
   const fingerprint=JSON.stringify(sec)+data.role;if(fingerprint===lastSecurity)return;lastSecurity=fingerprint;
-  const panel=$('security-panel'),root=$('security');root.replaceChildren();
-  const has=Boolean(text.plaintext||hash.digest_hex||im.metrics||audio.sha256||ev.summary||sig.sha256||Object.keys(crypto).length);panel.hidden=!has;if(!has)return;
+  const root={text:$('security-text'),image:$('security-image'),audio:$('security-audio'),
+              defense:$('security-defense'),performance:$('security-performance'),evidence:$('security-evidence')};
+  for(const node of Object.values(root))node.replaceChildren();
   if(text.plaintext){
-    const box=section(root,'Text encryption and one-bit changes');
+    const box=section(root.text,'Text encryption and one-bit changes');
     for(const [label,value] of [['Plaintext',text.plaintext],['Ciphertext (Base64)',text.ciphertext_base64],['Recovered',text.recovered_plaintext]]){
       box.append(el('div','label',label),el('pre','',value||''));
     }
@@ -348,7 +503,7 @@ function drawSecurity(data){
     box.append(el('p','measure-note','One plaintext bit or one key bit changes with fixed IV. Hex digits are ciphertext representation, not plaintext characters.'));
   }
   if(hash.digest_hex){
-    const box=section(root,'SHA-256 digest and properties');
+    const box=section(root.evidence,'SHA-256 digest and properties');
     box.append(el('div','label','Synthetic mission brief digest'),el('pre','',hash.digest_hex));
     metricRow(box,'Median digest generation',hash.generation_time_ms_median+' ms');
     measurement(box,'One input-bit digest change',hash.one_input_bit_digest_change_pct_median,100,'%');
@@ -359,7 +514,7 @@ function drawSecurity(data){
     box.append(el('p','measure-note','Bounded '+search.candidates+'-candidate search: pre-image '+Boolean(search.preimage_found)+', second pre-image '+Boolean(search.second_preimage_found)+', collision '+Boolean(search.collision_found)+'. '+(hash.limit||'')));
   }
   if(im.metrics){
-    const box=section(root,'RGB image measurements'),m=im.metrics;
+    const box=section(root.image,'RGB image measurements'),m=im.metrics;
     measurement(box,'Original entropy',m.entropy_original_bits_per_byte,8,'bits/byte');
     measurement(box,'Encrypted entropy',m.entropy_encrypted_bits_per_byte,8,'bits/byte');
     measurement(box,'NPCR, changed pixels',m.npcr_ciphertexts_one_plaintext_bit_pct,100,'%');
@@ -373,7 +528,7 @@ function drawSecurity(data){
     box.append(el('p','measure-note','Ciphertext bytes are mapped to RGB pixels for display. NPCR and UACI compare two ciphertext views after one plaintext-bit change.'));
   }
   if(audio.sha256){
-    const box=section(root,'Synthetic audio encryption');
+    const box=section(root.audio,'Synthetic audio encryption');
     metricRow(box,'MP3 bytes',audio.source_bytes);metricRow(box,'Recovered SHA-256',audio.sha256);
     box.append(el('div','label','Ciphertext prefix (Base64)'),el('pre','',audio.ciphertext_prefix_base64||''));
     box.append(el('p','measure-note','Conventional AES encryption of MP3 bytes; recovered audio matches the baseline. Ciphertext is not playable.'));
@@ -384,7 +539,7 @@ function drawSecurity(data){
     }
   }
   if(ev.summary){
-    const box=section(root,'Containment comparison'),s=ev.summary;
+    const box=section(root.defense,'Containment comparison'),s=ev.summary;
     box.append(el('p','muted',ev.pairs+' trial pairs · copy-only simulator'));
     measurement(box,'Real copies with monitoring',s.with_real_copies_median,5,'median');
     measurement(box,'Real copies without monitoring',s.without_real_copies_median,5,'median');
@@ -397,33 +552,55 @@ function drawSecurity(data){
   else if(crypto.audio)perf.push(['Audio encrypt',crypto.audio.aes_encrypt_median_ms],['Audio decrypt',crypto.audio.aes_decrypt_median_ms]);
   if(crypto.video)perf.push(['Video encrypt',crypto.video.aes_encrypt_median_ms],['Video decrypt',crypto.video.aes_decrypt_median_ms]);
   if(perf.length){
-    const box=section(root,'AES processing time'),numbers=perf.map(x=>x[1]).filter(x=>typeof x==='number');
+    const box=section(root.performance,'AES processing time'),numbers=perf.map(x=>x[1]).filter(x=>typeof x==='number');
     const max=Math.max(...numbers,.001);for(const [label,value] of perf)measurement(box,label,value,max,'ms');
     box.append(el('p','measure-note','Median time per sample. File sizes differ; use throughput for size-normalized comparison.'));
   }
   if(sig.sha256){
-    const box=section(root,'Stored digital signature');
+    const box=section(root.evidence,'Stored digital signature');
     box.append(el('div','label','SHA-256 digest'),el('pre','',sig.sha256),el('div','label','RSA-PSS signature (Base64)'),el('pre','',sig.signature_base64||''));
     const timing=sig.timings_ms_median||{};
     box.append(el('p','measure-note','Median hash '+timing.sha256+' ms · sign '+timing.sign+' ms · verify '+timing.verify+' ms · tamper rejected: '+Boolean(sig.tampered_byte_rejected)+'. Displayed record; independently verify using tests.signature_demo.'));
   }
   if(data.role==='victim'&&im.previews_available){
-    const box=section(root,'RGB pixel previews'),gallery=el('div','previews');
+    const box=section(root.image,'RGB pixel previews'),gallery=el('div','previews');
     for(const [name,label] of [['original','Original RGB'],['encrypted','Ciphertext pixels'],['recovered','Recovered RGB']]){
       const figure=el('figure',''),picture=el('img','');picture.src='/api/security-image/'+name;picture.alt=label;
       figure.append(picture,el('figcaption','',label));gallery.append(figure);
     }box.append(gallery);
   }
 }
-function draw(data){$('title').textContent=data.title;$('updated').textContent='Updated '+data.updated.replace('T',' ')+' UTC · refreshes every 4 seconds';
+function draw(data){role=data.role;$('title').textContent=data.title;$('updated').textContent='Updated '+data.updated.replace('T',' ')+' UTC · refreshes every 4 seconds';
+$('mode-pill').textContent=role==='attacker'?'CONTROLLED LAB ACTIONS':'READ ONLY · LAB VM';
+document.querySelector('[data-tab="controls"]').hidden=role!=='attacker';showTab(activeTab);
 const cards=$('cards');cards.replaceChildren();for(const c of data.cards){const box=el('div','card');box.append(el('div','label',c.label),el('div','value',c.value),el('div','note',c.note));cards.append(box)}
 const summary=$('summary');summary.replaceChildren();for(const row of data.summary){const item=el('div','row');item.append(el('span','',row.label),el('span','',row.value));summary.append(item)}
 const visual=$('visual');visual.replaceChildren();
 if(data.role==='victim'){$('chart-title').textContent='Latest encryption trial';const t=data.trial;if(!t){visual.append(el('p','muted','No local simulator trial found.'))}else{for(const [label,n,cls] of [['Decoy copies',t.decoy,''],['Real copies',t.real,'real']]){const wrap=el('div','');const head=el('div','barhead');head.append(el('span','',label),el('strong','',n));const track=el('div','track');const fill=el('div','fill '+cls);fill.style.width=Math.min(100,n/10*100)+'%';track.append(fill);wrap.append(head,track);visual.append(wrap)}visual.append(el('p','muted',t.name+(t.complete?' · completed':' · interrupted or in progress')))}}
 else{$('chart-title').textContent='Local recovered files';if(!data.files.length)visual.append(el('p','muted','No received files yet.'));for(const f of data.files){const row=el('div','row');row.append(el('span','',f.name),el('span',f.valid?'ok':'bad',(f.valid?'SHA-256 verified':'Unverified')+' · '+f.bytes.toLocaleString()+' bytes'));visual.append(row)}}
-const table=$('events');table.replaceChildren();for(const event of data.events){const tr=el('tr','');for(const field of ['ts','module','event','detail'])tr.append(el('td','',event[field]));table.append(tr)}if(!data.events.length){const tr=el('tr','');const td=el('td','muted','No recorded events yet.');td.colSpan=4;tr.append(td);table.append(tr)}drawSecurity(data)}
+const table=$('events');table.replaceChildren();for(const event of data.events){const tr=el('tr','');for(const field of ['ts','module','event','detail'])tr.append(el('td','',event[field]));table.append(tr)}if(!data.events.length){const tr=el('tr','');const td=el('td','muted','No recorded events yet.');td.colSpan=4;tr.append(td);table.append(tr)}
+const reports=$('reports');reports.replaceChildren();for(const report of data.reports||[]){const box=section(reports,report.name);box.append(el('pre','',report.text))}if(!reports.children.length)reports.append(el('p','muted','No generated report is available on this VM.'));
+drawSecurity(data)}
 async function refresh(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);draw(await response.json())}catch(error){$('updated').textContent='Dashboard data unavailable: '+error.message}}
-refresh();setInterval(refresh,4000);
+async function refreshAction(){
+  if(role!=='attacker')return;
+  try{
+    const response=await fetch('/api/action/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);
+    const state=await response.json();$('action-status').textContent=(state.command||'Lab controls')+' · '+state.status+' · '+state.detail;
+    for(const button of document.querySelectorAll('[data-action]'))button.disabled=state.status==='running';
+  }catch(error){$('action-status').textContent='Action status unavailable: '+error.message}
+}
+for(const button of document.querySelectorAll('[data-action]'))button.addEventListener('click',async()=>{
+  button.disabled=true;$('action-status').textContent='Starting '+button.dataset.action+'…';
+  try{
+    const response=await fetch('/api/action/'+button.dataset.action,{
+      method:'POST',headers:{'X-ISLab-Action-Token':ACTION_TOKEN}
+    });
+    const result=await response.json();if(!response.ok)throw Error(result.error||'HTTP '+response.status);
+    await refreshAction();
+  }catch(error){$('action-status').textContent='Could not start action: '+error.message;button.disabled=false}
+});
+refresh();refreshAction();setInterval(refresh,4000);setInterval(refreshAction,2000);
 </script></body></html>'''
 
 
@@ -467,12 +644,31 @@ def _telemetry_server():
 
 def serve(role, port):
     collector = _victim if role == "victim" else _attacker
+    controller = ActionController() if role == "attacker" else None
+    action_token = secrets.token_urlsafe(24) if controller else ""
 
     class Handler(BaseHTTPRequestHandler):
+        def _local(self):
+            return (self.client_address[0] == "127.0.0.1" and
+                    self.headers.get("Host") in {f"127.0.0.1:{port}", f"localhost:{port}"})
+
+        def _json_response(self, status, data):
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
+            if not self._local():
+                self.send_error(403)
+                return
             path = urlsplit(self.path).path
             if path == "/":
-                body, kind = HTML.encode("utf-8"), "text/html; charset=utf-8"
+                body, kind = HTML.replace("__ACTION_TOKEN__", action_token).encode("utf-8"), "text/html; charset=utf-8"
             elif path == "/api/status":
                 try:
                     body = json.dumps(collector()).encode("utf-8")
@@ -480,6 +676,8 @@ def serve(role, port):
                     self.send_error(500, f"Could not read dashboard data: {exc}")
                     return
                 kind = "application/json; charset=utf-8"
+            elif controller is not None and path == "/api/action/status":
+                body, kind = json.dumps(controller.status()).encode("utf-8"), "application/json; charset=utf-8"
             elif role == "victim" and path in {
                     "/api/security-image/original", "/api/security-image/encrypted",
                     "/api/security-image/recovered"}:
@@ -532,6 +730,31 @@ def serve(role, port):
             self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self):
+            if controller is None or not self._local():
+                self.send_error(403)
+                return
+            origin = self.headers.get("Origin")
+            if (origin not in (None, f"http://127.0.0.1:{port}", f"http://localhost:{port}") or
+                    not hmac.compare_digest(self.headers.get("X-ISLab-Action-Token", ""), action_token) or
+                    self.headers.get("Content-Length", "0") != "0"):
+                self.send_error(403)
+                return
+            path = urlsplit(self.path).path
+            if not path.startswith("/api/action/"):
+                self.send_error(404)
+                return
+            command = path.removeprefix("/api/action/")
+            try:
+                status = controller.start(command)
+            except ValueError as exc:
+                self._json_response(400, {"error": str(exc)})
+                return
+            except RuntimeError as exc:
+                self._json_response(409, {"error": str(exc)})
+                return
+            self._json_response(202, status)
 
         def log_message(self, format, *args):
             pass
