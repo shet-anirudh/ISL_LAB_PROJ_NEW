@@ -36,8 +36,9 @@ class ActionController:
     ALLOWED = {"PING", "START_ENCRYPT", "START_EXFIL", "ANALYZE_PCAP", "VERIFY_SIGNATURE",
                "VERIFY_DATASET", "RUN_BACKUP", "RESTORE_TRIAL"}
 
-    def __init__(self):
+    def __init__(self, capture=None):
         self.lock = threading.Lock()
+        self.capture = capture
         self.state = {"status": "idle", "command": None, "detail": "No action run yet"}
 
     def status(self):
@@ -47,6 +48,8 @@ class ActionController:
     def start(self, command):
         if command not in self.ALLOWED:
             raise ValueError("Action is not in the synthetic command allowlist")
+        if command == "ANALYZE_PCAP" and self.capture is not None and self.capture.is_running():
+            raise RuntimeError("Stop the dashboard capture before analyzing its PCAP")
         with self.lock:
             if self.state["status"] == "running":
                 raise RuntimeError("An action is already running")
@@ -483,6 +486,10 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 <div class="action-buttons"><button class="action-button" data-action="VERIFY_DATASET">Verify dataset</button>
 <button class="action-button" data-action="RUN_BACKUP">Create TLS backup</button>
 <button class="action-button" data-action="RESTORE_TRIAL">Restore latest backup to trial</button></div>
+<h3>Host-only network capture</h3><p class="muted">Capture only victim C2 and transfer ports on Kali eth1. Automatically stops after five minutes or 10 MiB.</p>
+<div class="action-buttons"><button class="action-button" data-capture="start">Start PCAP capture</button>
+<button class="action-button" data-capture="stop">Stop PCAP capture</button></div>
+<div class="action-status" id="capture-status" role="status">No dashboard capture started.</div>
 <div class="action-status" id="action-status" role="status">No action run yet.</div></section></div>
 <div class="tab-view" id="tab-text" hidden><section class="panel"><h2>Text encryption</h2><div id="security-text"></div></section></div>
 <div class="tab-view" id="tab-image" hidden><section class="panel"><h2>RGB image analysis</h2><div id="security-image"></div></section></div>
@@ -631,13 +638,36 @@ async function refreshAction(){
   try{
     const response=await fetch('/api/action/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);
     const state=await response.json();$('action-status').textContent=(state.command||'Lab controls')+' · '+state.status+' · '+state.detail;
-    for(const button of document.querySelectorAll('[data-action]'))button.disabled=state.status==='running';
+    for(const button of document.querySelectorAll('[data-action]'))button.disabled=state.status==='running'||(button.dataset.action==='ANALYZE_PCAP'&&captureRunning);
     if(state.command==='ANALYZE_PCAP'&&state.status==='completed'&&state.finished!==lastReportAction){
       lastReportAction=state.finished;selectedReport=null;await refresh();
     }
   }catch(error){$('action-status').textContent='Action status unavailable: '+error.message}
 }
 let lastReportAction=null;
+let captureRunning=false;
+async function refreshCapture(){
+  if(role!=='attacker')return;
+  try{
+    const response=await fetch('/api/capture/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);
+    const state=await response.json();captureRunning=state.status==='capturing';
+    $('capture-status').textContent=(state.file||'Capture')+' · '+state.status+' · '+state.detail+' · '+(state.bytes||0)+' bytes';
+    document.querySelector('[data-capture="start"]').disabled=captureRunning;
+    document.querySelector('[data-capture="stop"]').disabled=!captureRunning;
+    const analyze=document.querySelector('[data-action="ANALYZE_PCAP"]');
+    analyze.disabled=captureRunning||document.querySelector('[data-action="PING"]').disabled;
+  }catch(error){$('capture-status').textContent='Capture status unavailable: '+error.message}
+}
+for(const button of document.querySelectorAll('[data-capture]'))button.addEventListener('click',async()=>{
+  button.disabled=true;$('capture-status').textContent=(button.dataset.capture==='start'?'Starting':'Stopping')+' capture…';
+  try{
+    const response=await fetch('/api/capture/'+button.dataset.capture,{
+      method:'POST',headers:{'X-ISLab-Action-Token':ACTION_TOKEN}
+    });
+    const result=await response.json();if(!response.ok)throw Error(result.error||'HTTP '+response.status);
+    await refreshCapture();
+  }catch(error){$('capture-status').textContent='Capture action failed: '+error.message;await refreshCapture()}
+});
 for(const button of document.querySelectorAll('[data-action]'))button.addEventListener('click',async()=>{
   button.disabled=true;$('action-status').textContent='Starting '+button.dataset.action+'…';
   try{
@@ -648,7 +678,7 @@ for(const button of document.querySelectorAll('[data-action]'))button.addEventLi
     await refreshAction();
   }catch(error){$('action-status').textContent='Could not start action: '+error.message;button.disabled=false}
 });
-refresh();refreshAction();setInterval(refresh,4000);setInterval(refreshAction,2000);
+refresh();refreshAction();refreshCapture();setInterval(refresh,4000);setInterval(refreshAction,2000);setInterval(refreshCapture,2000);
 </script></body></html>'''
 
 
@@ -692,7 +722,12 @@ def _telemetry_server():
 
 def serve(role, port):
     collector = _victim if role == "victim" else _attacker
-    controller = ActionController() if role == "attacker" else None
+    if role == "attacker":
+        from attacker.capture_control import CaptureController
+        capture = CaptureController()
+    else:
+        capture = None
+    controller = ActionController(capture) if capture is not None else None
     action_token = secrets.token_urlsafe(24) if controller else ""
 
     class Handler(BaseHTTPRequestHandler):
@@ -726,6 +761,8 @@ def serve(role, port):
                 kind = "application/json; charset=utf-8"
             elif controller is not None and path == "/api/action/status":
                 body, kind = json.dumps(controller.status()).encode("utf-8"), "application/json; charset=utf-8"
+            elif capture is not None and path == "/api/capture/status":
+                body, kind = json.dumps(capture.status()).encode("utf-8"), "application/json; charset=utf-8"
             elif role == "victim" and path in {
                     "/api/security-image/original", "/api/security-image/encrypted",
                     "/api/security-image/recovered"}:
@@ -790,6 +827,14 @@ def serve(role, port):
                 self.send_error(403)
                 return
             path = urlsplit(self.path).path
+            if path in {"/api/capture/start", "/api/capture/stop"}:
+                try:
+                    state = capture.start() if path.endswith("/start") else capture.stop()
+                except (RuntimeError, ValueError, OSError) as exc:
+                    self._json_response(409, {"error": str(exc)[:220]})
+                    return
+                self._json_response(202, state)
+                return
             if not path.startswith("/api/action/"):
                 self.send_error(404)
                 return
@@ -818,6 +863,8 @@ def serve(role, port):
             print(f"{role.title()} dashboard: http://127.0.0.1:{port}/ (Ctrl+C to stop)", flush=True)
             server.serve_forever()
     finally:
+        if capture is not None and capture.is_running():
+            capture.stop()
         if telemetry is not None:
             telemetry.shutdown()
             telemetry.server_close()
