@@ -115,6 +115,10 @@ def _security_data():
                   if p.is_dir() and not p.is_symlink()]
     image_dir = max(image_dirs, key=lambda p: p.stat().st_mtime_ns) if image_dirs else None
     image_result = _json_file(image_dir / "metrics.json", {}) if image_dir else {}
+    audio_dirs = [p for p in results.glob("audio_security_*")
+                  if p.is_dir() and not p.is_symlink()]
+    audio_dir = max(audio_dirs, key=lambda p: p.stat().st_mtime_ns) if audio_dirs else None
+    audio_result = _json_file(audio_dir / "metrics.json", {}) if audio_dir else {}
     evaluations = [p for p in results.glob("defense_evaluation_*.json")
                    if p.is_file() and not p.is_symlink()]
     evaluation = _json_file(max(evaluations, key=lambda p: p.stat().st_mtime_ns), {}) if evaluations else {}
@@ -131,6 +135,14 @@ def _security_data():
                   "previews_available": image_dir is not None and all(
                       (image_dir / filename).is_file() and not (image_dir / filename).is_symlink()
                       for filename in ("original.png", "encrypted_pixels.png", "recovered.png"))},
+        "audio": {"source_bytes": audio_result.get("source_bytes"),
+                  "sha256": audio_result.get("sha256"),
+                  "ciphertext_prefix_base64": audio_result.get("ciphertext_prefix_base64"),
+                  "timings_ms_median": audio_result.get("timings_ms_median"),
+                  "recovered_matches_baseline": audio_result.get("recovered_matches_baseline"),
+                  "playback_available": audio_dir is not None and
+                  (audio_dir / "recovered.mp3").is_file() and
+                  not (audio_dir / "recovered.mp3").is_symlink()},
         "evaluation": {"pairs": evaluation.get("pairs"), "summary": evaluation.get("summary")},
         "signature": {key: signature.get(key) for key in
                       ("sha256", "signature_base64", "timings_ms_median", "tampered_byte_rejected")},
@@ -315,10 +327,10 @@ function metricRow(container,label,value){const row=el('div','row');row.append(e
 function section(parent,title){const box=el('div','');box.append(el('h3','',title));parent.append(box);return box}
 let lastSecurity='';
 function drawSecurity(data){
-  const sec=data.security||{},text=sec.text||{},im=sec.image||{},ev=sec.evaluation||{},sig=sec.signature||{},crypto=sec.crypto||{};
+  const sec=data.security||{},text=sec.text||{},im=sec.image||{},audio=sec.audio||{},ev=sec.evaluation||{},sig=sec.signature||{},crypto=sec.crypto||{};
   const fingerprint=JSON.stringify(sec)+data.role;if(fingerprint===lastSecurity)return;lastSecurity=fingerprint;
   const panel=$('security-panel'),root=$('security');root.replaceChildren();
-  const has=Boolean(text.plaintext||im.metrics||ev.summary||sig.sha256||Object.keys(crypto).length);panel.hidden=!has;if(!has)return;
+  const has=Boolean(text.plaintext||im.metrics||audio.sha256||ev.summary||sig.sha256||Object.keys(crypto).length);panel.hidden=!has;if(!has)return;
   if(text.plaintext){
     const box=section(root,'Text encryption and one-bit changes');
     for(const [label,value] of [['Plaintext',text.plaintext],['Ciphertext (Base64)',text.ciphertext_base64],['Recovered',text.recovered_plaintext]]){
@@ -342,6 +354,17 @@ function drawSecurity(data){
     ])metricRow(box,label,typeof m[key]==='number'?m[key].toFixed(4)+' '+unit:String(m[key]));
     box.append(el('p','measure-note','Ciphertext bytes are mapped to RGB pixels for display. NPCR and UACI compare two ciphertext views after one plaintext-bit change.'));
   }
+  if(audio.sha256){
+    const box=section(root,'Synthetic audio encryption');
+    metricRow(box,'MP3 bytes',audio.source_bytes);metricRow(box,'Recovered SHA-256',audio.sha256);
+    box.append(el('div','label','Ciphertext prefix (Base64)'),el('pre','',audio.ciphertext_prefix_base64||''));
+    box.append(el('p','measure-note','Conventional AES encryption of MP3 bytes; recovered audio matches the baseline. Ciphertext is not playable.'));
+    if(data.role==='victim'&&audio.playback_available){
+      for(const [name,label] of [['original','Original synthetic MP3'],['recovered','Recovered synthetic MP3']]){
+        box.append(el('div','label',label));const player=el('audio','');player.controls=true;player.preload='none';player.src='/api/security-audio/'+name;box.append(player);
+      }
+    }
+  }
   if(ev.summary){
     const box=section(root,'Containment comparison'),s=ev.summary;
     box.append(el('p','muted',ev.pairs+' trial pairs · copy-only simulator'));
@@ -352,7 +375,9 @@ function drawSecurity(data){
   const perf=[];
   if(text.timings_ms_median)perf.push(['Text encrypt',text.timings_ms_median.encrypt],['Text decrypt',text.timings_ms_median.decrypt]);
   if(im.timings_ms_median)perf.push(['RGB encrypt',im.timings_ms_median.encrypt],['RGB decrypt',im.timings_ms_median.decrypt]);
-  for(const kind of ['audio','video'])if(crypto[kind])perf.push([kind+' encrypt',crypto[kind].aes_encrypt_median_ms],[kind+' decrypt',crypto[kind].aes_decrypt_median_ms]);
+  if(audio.timings_ms_median)perf.push(['Audio encrypt',audio.timings_ms_median.encrypt],['Audio decrypt',audio.timings_ms_median.decrypt]);
+  else if(crypto.audio)perf.push(['Audio encrypt',crypto.audio.aes_encrypt_median_ms],['Audio decrypt',crypto.audio.aes_decrypt_median_ms]);
+  if(crypto.video)perf.push(['Video encrypt',crypto.video.aes_encrypt_median_ms],['Video decrypt',crypto.video.aes_decrypt_median_ms]);
   if(perf.length){
     const box=section(root,'AES processing time'),numbers=perf.map(x=>x[1]).filter(x=>typeof x==='number');
     const max=Math.max(...numbers,.001);for(const [label,value] of perf)measurement(box,label,value,max,'ms');
@@ -460,6 +485,24 @@ def serve(role, port):
                     self.send_error(404)
                     return
                 kind = "image/png"
+            elif role == "victim" and path in {
+                    "/api/security-audio/original", "/api/security-audio/recovered"}:
+                if path.endswith("/original"):
+                    audio_path = Path(TEST_DATA_DIR) / "03_Media" / "briefing.mp3"
+                else:
+                    directories = [p for p in (ROOT / "results").glob("audio_security_*")
+                                   if p.is_dir() and not p.is_symlink()]
+                    if not directories:
+                        self.send_error(404)
+                        return
+                    audio_path = max(directories, key=lambda p: p.stat().st_mtime_ns) / "recovered.mp3"
+                expected = _baseline().get("03_Media/briefing.mp3")
+                if (audio_path.is_symlink() or not audio_path.is_file() or
+                        audio_path.stat().st_size > 5 * 1024 * 1024 or
+                        not expected or _sha256(audio_path) != expected):
+                    self.send_error(404)
+                    return
+                body, kind = audio_path.read_bytes(), "audio/mpeg"
             else:
                 self.send_error(404)
                 return

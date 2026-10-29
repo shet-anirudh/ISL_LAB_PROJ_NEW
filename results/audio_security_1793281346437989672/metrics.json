@@ -1,0 +1,21 @@
+{
+  "generated_utc": "2026-10-29T13:42:26.438321+00:00",
+  "source": "03_Media/briefing.mp3",
+  "sha256": "d3e976046ea5dc33589b4a45c2a2e1a88a29d555a4bb1907f4d93aba0f4de8b8",
+  "source_bytes": 80685,
+  "encrypted_bytes": 80704,
+  "ciphertext_prefix_base64": "tnMGAxGCGhaIjNDG+6J6PSyzvzp2G7v0wNTjTeYsBACmKrnbqhmEbfTiNsmHHhtH",
+  "algorithm": "AES-256-CBC with PKCS7; RSA-OAEP wrapped AES key",
+  "files": {
+    "encrypted": "encrypted.bin",
+    "wrapped_key": "wrapped_key.bin",
+    "recovered": "recovered.mp3"
+  },
+  "timings_ms_median": {
+    "encrypt": 0.073935,
+    "decrypt": 0.033973
+  },
+  "trials": 10,
+  "recovered_matches_baseline": true,
+  "note": "Ciphertext is not a playable MP3; original and recovered previews are played locally on the victim dashboard."
+}
