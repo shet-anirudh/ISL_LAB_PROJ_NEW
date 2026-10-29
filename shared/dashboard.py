@@ -34,7 +34,7 @@ class ActionController:
     """At most one local, allowlisted C2 action at a time."""
 
     ALLOWED = {"PING", "START_ENCRYPT", "START_EXFIL", "ANALYZE_PCAP", "VERIFY_SIGNATURE",
-               "VERIFY_DATASET", "RUN_BACKUP", "RESTORE_TRIAL"}
+               "VERIFY_DATASET", "RUN_BACKUP", "RESTORE_TRIAL", "FULL_LAB_SEQUENCE"}
 
     def __init__(self, capture=None):
         self.lock = threading.Lock()
@@ -48,116 +48,162 @@ class ActionController:
     def start(self, command):
         if command not in self.ALLOWED:
             raise ValueError("Action is not in the synthetic command allowlist")
-        if command == "ANALYZE_PCAP" and self.capture is not None and self.capture.is_running():
+        if command in {"ANALYZE_PCAP", "FULL_LAB_SEQUENCE"} and self.capture is not None and self.capture.is_running():
             raise RuntimeError("Stop the dashboard capture before analyzing its PCAP")
         with self.lock:
             if self.state["status"] == "running":
                 raise RuntimeError("An action is already running")
             self.state = {"status": "running", "command": command,
-                          "detail": "Running local analysis" if command in {"ANALYZE_PCAP", "VERIFY_SIGNATURE"}
-                          else "Waiting for the victim lab agent", "started": _now()}
+                          "detail": "Running full lab sequence" if command == "FULL_LAB_SEQUENCE"
+                          else "Running local analysis" if command in {"ANALYZE_PCAP", "VERIFY_SIGNATURE"}
+                          else "Waiting for the victim lab agent", "started": _now(), "steps": []}
         threading.Thread(target=self._run, args=(command,), daemon=True).start()
         return self.status()
 
     def _run(self, command):
+        try:
+            if command == "FULL_LAB_SEQUENCE":
+                detail = self._full_sequence()
+            elif command == "ANALYZE_PCAP":
+                detail = self._analyze()
+            elif command == "VERIFY_SIGNATURE":
+                detail = self._verify_signature()
+            else:
+                detail = self._remote(command)
+            status = "completed"
+        except Exception as exc:
+            status, detail = "failed", str(exc)[:220]
+        with self.lock:
+            self.state.update(status=status, detail=detail, finished=_now())
+
+    def _step(self, label, operation):
+        with self.lock:
+            self.state["steps"].append({"name": label, "status": "running", "detail": "In progress"})
+            self.state["detail"] = label
+            index = len(self.state["steps"]) - 1
+        try:
+            result = operation()
+        except Exception as exc:
+            with self.lock:
+                self.state["steps"][index].update(status="failed", detail=str(exc)[:180])
+            raise
+        with self.lock:
+            self.state["steps"][index].update(status="completed", detail=str(result)[:180])
+        return result
+
+    def _full_sequence(self):
+        if self.capture is None:
+            raise RuntimeError("Kali dashboard capture control is unavailable")
+        started = False
+        try:
+            name = self._step("Start PCAP capture", lambda: self.capture.start()["file"])
+            started = True
+            self._step("Contained trial", lambda: self._remote("START_ENCRYPT"))
+            self._step("Synthetic PDF transfer", lambda: self._remote("START_EXFIL"))
+            self._step("Verify original dataset", lambda: self._remote("VERIFY_DATASET"))
+            self._step("Stop PCAP capture", lambda: self.capture.stop()["file"])
+            started = False
+            report = self._step("Analyze and report", lambda: self._analyze(self.capture.path))
+            return f"Full synthetic sequence completed; {name}; {report}"
+        except Exception:
+            if started and self.capture.is_running():
+                try:
+                    self._step("Stop capture after failure", lambda: self.capture.stop()["file"])
+                except Exception:
+                    pass
+            raise
+
+    def _analyze(self, capture=None):
+        if capture is None:
+            captures = [p for p in (ROOT / "results" / "pcap").glob("*.pcapng")
+                        if p.is_file() and not p.is_symlink()]
+            if not captures:
+                raise FileNotFoundError("No Kali PCAP found in results/pcap")
+            capture = max(captures, key=lambda p: p.stat().st_mtime_ns)
+        report_name = None
+        for module in ("analysis.pcap_parser", "analysis.forensic_report"):
+            result = subprocess.run([sys.executable, "-m", module, str(capture)],
+                                    cwd=ROOT, capture_output=True, text=True, timeout=60)
+            if result.returncode:
+                raise RuntimeError(f"{module}: {(result.stderr or result.stdout)[-180:]}")
+            if module == "analysis.forensic_report":
+                prefix = "PASS: forensic report saved to "
+                names = [line[len(prefix):].strip() for line in result.stdout.splitlines()
+                         if line.startswith(prefix)]
+                if names:
+                    report_name = Path(names[-1]).name
+        if not report_name:
+            raise RuntimeError("Forensic report completed without a saved report path")
+        return f"Analyzed {capture.name}; report: {report_name}"
+
+    def _verify_signature(self):
+        signatures = [p for p in (ROOT / "results" / "signatures").glob("*.sig.json")
+                      if p.is_file() and not p.is_symlink()]
+        if not signatures:
+            raise FileNotFoundError("No committed signature result found")
+        newest = max(signatures, key=lambda p: p.stat().st_mtime_ns)
+        source = _json_file(newest, {}).get("source")
+        if not isinstance(source, str) or not source.startswith("results/defense_evaluation_"):
+            raise ValueError("Signature record does not identify a synthetic evaluation")
+        result = subprocess.run([sys.executable, "-m", "tests.signature_demo", "--verify", source],
+                                cwd=ROOT, capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            raise RuntimeError((result.stderr or result.stdout)[-180:])
+        return f"Verified RSA-PSS signature for {Path(source).name}"
+
+    def _remote(self, command):
         receiver_thread = None
         receiver_result = {}
         try:
-            if command == "ANALYZE_PCAP":
-                captures = [p for p in (ROOT / "results" / "pcap").glob("*.pcapng")
-                            if p.is_file() and not p.is_symlink()]
-                if not captures:
-                    raise FileNotFoundError("No Kali PCAP found in results/pcap")
-                capture = max(captures, key=lambda p: p.stat().st_mtime_ns)
-                report_name = None
-                for module in ("analysis.pcap_parser", "analysis.forensic_report"):
-                    result = subprocess.run([sys.executable, "-m", module, str(capture)],
-                                            cwd=ROOT, capture_output=True, text=True, timeout=60)
-                    if result.returncode:
-                        raise RuntimeError(f"{module}: {(result.stderr or result.stdout)[-180:]}")
-                    if module == "analysis.forensic_report":
-                        prefix = "PASS: forensic report saved to "
-                        names = [line[len(prefix):].strip() for line in result.stdout.splitlines()
-                                 if line.startswith(prefix)]
-                        if names:
-                            report_name = Path(names[-1]).name
-                if not report_name:
-                    raise RuntimeError("Forensic report completed without a saved report path")
-                detail, state = f"Analyzed {capture.name}; report: {report_name}", "completed"
-            elif command == "VERIFY_SIGNATURE":
-                signatures = [p for p in (ROOT / "results" / "signatures").glob("*.sig.json")
-                              if p.is_file() and not p.is_symlink()]
-                if not signatures:
-                    raise FileNotFoundError("No committed signature result found")
-                newest = max(signatures, key=lambda p: p.stat().st_mtime_ns)
-                source = _json_file(newest, {}).get("source")
-                if not isinstance(source, str) or not source.startswith("results/defense_evaluation_"):
-                    raise ValueError("Signature record does not identify a synthetic evaluation")
-                result = subprocess.run([sys.executable, "-m", "tests.signature_demo", "--verify", source],
-                                        cwd=ROOT, capture_output=True, text=True, timeout=20)
-                if result.returncode:
-                    raise RuntimeError((result.stderr or result.stdout)[-180:])
-                detail, state = f"Verified RSA-PSS signature for {Path(source).name}", "completed"
-            else:
-                if command == "START_EXFIL":
-                    from attacker.transfer_receiver import receive_once
+            if command == "START_EXFIL":
+                from attacker.transfer_receiver import receive_once
+                ready = threading.Event()
 
-                    ready = threading.Event()
+                def receive():
+                    try:
+                        receiver_result["record"] = receive_once(ready=ready, accept_timeout=25)
+                    except Exception as exc:
+                        receiver_result["error"] = str(exc)[:180]
+                        ready.set()
 
-                    def receive():
-                        try:
-                            receiver_result["record"] = receive_once(
-                                ready=ready, accept_timeout=25)
-                        except Exception as exc:
-                            receiver_result["error"] = str(exc)[:180]
-                            ready.set()
-
-                    receiver_thread = threading.Thread(target=receive, daemon=True)
-                    receiver_thread.start()
-                    if not ready.wait(timeout=3) or "error" in receiver_result:
-                        raise RuntimeError(receiver_result.get("error", "Transfer receiver did not start"))
-                from attacker.c2_server import serve_once
-                response = serve_once(command, accept_timeout=20)
-                if response["cmd"] != "ACK":
-                    raise RuntimeError(f"Victim rejected {command}: {response['data']}")
-                data = response["data"]
-                if command == "START_ENCRYPT" and not (data.get("executed") and data.get("contained")):
-                    raise RuntimeError("Victim did not confirm copy-only containment")
-                if command == "VERIFY_DATASET" and not (data.get("executed") and
-                                                           data.get("intact") and data.get("files") == 20):
-                    raise RuntimeError("Victim did not confirm 20 baseline files")
-                if command == "RUN_BACKUP" and not (data.get("executed") and
-                                                      data.get("verified") and data.get("files") == 20):
-                    raise RuntimeError("Victim did not confirm a verified backup")
-                if command == "RESTORE_TRIAL" and not (data.get("executed") and
-                                                        data.get("files") == 20 and data.get("trial")):
-                    raise RuntimeError("Victim did not confirm an isolated restore")
-                if command == "START_EXFIL":
-                    receiver_thread.join(timeout=28)
-                    if "error" in receiver_result or receiver_thread.is_alive():
-                        raise RuntimeError(receiver_result.get("error", "Transfer receiver timed out"))
-                    record = receiver_result.get("record", {})
-                    if not data.get("executed") or record.get("file") != "01_Operations/report.pdf":
-                        raise RuntimeError("Verified synthetic transfer was not confirmed")
-                    detail = f"Recovered {record['file']} ({record['bytes']} bytes), SHA-256 verified"
-                elif command == "START_ENCRYPT":
-                    detail = f"Contained copy-only trial {data['trial']}"
-                elif command == "VERIFY_DATASET":
-                    detail = "Victim verified all 20 baseline files"
-                elif command == "RUN_BACKUP":
-                    detail = f"TLS backup {data['snapshot']} verified (20 files)"
-                elif command == "RESTORE_TRIAL":
-                    detail = f"Restored {data['snapshot']} into isolated {data['trial']} (20 files)"
-                else:
-                    detail = "Victim acknowledged PING (dry run)"
-                state = "completed"
-        except Exception as exc:
-            state, detail = "failed", str(exc)[:220]
+                receiver_thread = threading.Thread(target=receive, daemon=True)
+                receiver_thread.start()
+                if not ready.wait(timeout=3) or "error" in receiver_result:
+                    raise RuntimeError(receiver_result.get("error", "Transfer receiver did not start"))
+            from attacker.c2_server import serve_once
+            response = serve_once(command, accept_timeout=20)
+            if response["cmd"] != "ACK":
+                raise RuntimeError(f"Victim rejected {command}: {response['data']}")
+            data = response["data"]
+            if command == "START_ENCRYPT" and not (data.get("executed") and data.get("contained")):
+                raise RuntimeError("Victim did not confirm copy-only containment")
+            if command == "VERIFY_DATASET" and not (data.get("executed") and data.get("intact") and data.get("files") == 20):
+                raise RuntimeError("Victim did not confirm 20 baseline files")
+            if command == "RUN_BACKUP" and not (data.get("executed") and data.get("verified") and data.get("files") == 20):
+                raise RuntimeError("Victim did not confirm a verified backup")
+            if command == "RESTORE_TRIAL" and not (data.get("executed") and data.get("files") == 20 and data.get("trial")):
+                raise RuntimeError("Victim did not confirm an isolated restore")
+            if command == "START_EXFIL":
+                receiver_thread.join(timeout=28)
+                if "error" in receiver_result or receiver_thread.is_alive():
+                    raise RuntimeError(receiver_result.get("error", "Transfer receiver timed out"))
+                record = receiver_result.get("record", {})
+                if not data.get("executed") or record.get("file") != "01_Operations/report.pdf":
+                    raise RuntimeError("Verified synthetic transfer was not confirmed")
+                return f"Recovered {record['file']} ({record['bytes']} bytes), SHA-256 verified"
+            if command == "START_ENCRYPT":
+                return f"Contained copy-only trial {data['trial']}"
+            if command == "VERIFY_DATASET":
+                return "Victim verified all 20 baseline files"
+            if command == "RUN_BACKUP":
+                return f"TLS backup {data['snapshot']} verified (20 files)"
+            if command == "RESTORE_TRIAL":
+                return f"Restored {data['snapshot']} into isolated {data['trial']} (20 files)"
+            return "Victim acknowledged PING (dry run)"
+        except Exception:
             if receiver_thread is not None and receiver_thread.is_alive():
                 receiver_thread.join(timeout=27)
-        with self.lock:
-            self.state = {"status": state, "command": command, "detail": detail,
-                          "finished": _now()}
+            raise
 
 
 def _json_file(path, default):
@@ -464,6 +510,7 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 .tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}.tabs button,.action-button{font:inherit;cursor:pointer;border:1px solid #386079;border-radius:10px;color:#b9d5e6;background:#1b3248;padding:10px 14px}.tabs button[aria-selected="true"]{background:#24645e;border-color:#49c9ad;color:#fff}.tab-view[hidden],.tabs button[hidden]{display:none}.tab-view{margin-top:14px}.tab-view>.panel{margin-top:14px}.action-buttons{display:flex;flex-wrap:wrap;gap:12px}.action-button{background:#215b55;border-color:#48b9a7}.action-button:disabled{opacity:.5;cursor:wait}.action-status{margin-top:18px;padding:16px;background:#0c1b2d;border-radius:10px;min-height:70px}.tab-view audio{width:100%;margin:12px 0 18px}
 .tab-view pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1727;border:1px solid #294059;border-radius:10px;padding:12px;max-height:500px;overflow:auto;font-size:12px}
 .report-list{display:flex;flex-wrap:wrap;gap:9px;margin:0 0 18px}.report-list button{font:inherit;cursor:pointer;border:1px solid #386079;background:#183149;color:#c4dbe9;border-radius:9px;padding:8px 11px}.report-list button[aria-selected="true"]{border-color:#49c9ad;background:#24645e;color:#fff}
+.sequence-steps{padding-left:22px;color:#bad0dc;font-size:13px}.sequence-steps li{padding:5px 0}.sequence-steps li[data-status="completed"]{color:#65dec2}.sequence-steps li[data-status="failed"]{color:#ff9b83}
 @media(max-width:850px){.cards{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.wide{grid-column:auto}}@media(max-width:520px){.cards{grid-template-columns:1fr 1fr}.card{padding:14px}.value{font-size:27px}main{padding:20px 14px}.pill{display:none}}
 </style></head><body><main>
 <header><div><div class="eyebrow">IS Lab · Synthetic Environment</div><h1 id="title">Dashboard</h1><div class="muted" id="updated">Loading local evidence…</div></div><span class="pill" id="mode-pill">LAB VM</span></header>
@@ -477,6 +524,9 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 </div></div>
 <div class="tab-view" id="tab-controls" hidden><section class="panel"><h2>Controlled synthetic actions</h2>
 <p class="muted">Ubuntu must run the armed lab agent. Actions use signed C2; encryption writes disposable copies and transfer sends only the fixed synthetic report.</p>
+<div class="action-buttons"><button class="action-button" data-action="FULL_LAB_SEQUENCE">Run full lab sequence</button></div>
+<p class="muted">Capture → contained trial → verified PDF transfer → dataset check → stop capture → forensic report.</p>
+<ol id="sequence-steps" class="sequence-steps"></ol>
 <div class="action-buttons"><button class="action-button" data-action="PING">Ping victim</button>
 <button class="action-button" data-action="START_ENCRYPT">Run contained trial</button>
 <button class="action-button" data-action="START_EXFIL">Transfer synthetic PDF</button>
@@ -638,22 +688,26 @@ async function refreshAction(){
   try{
     const response=await fetch('/api/action/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);
     const state=await response.json();$('action-status').textContent=(state.command||'Lab controls')+' · '+state.status+' · '+state.detail;
+    fullSequenceRunning=state.command==='FULL_LAB_SEQUENCE'&&state.status==='running';
+    const progress=$('sequence-steps');progress.replaceChildren();
+    for(const step of state.steps||[]){const item=el('li','',step.name+' · '+step.status+' · '+step.detail);item.dataset.status=step.status;progress.append(item)}
     for(const button of document.querySelectorAll('[data-action]'))button.disabled=state.status==='running'||(button.dataset.action==='ANALYZE_PCAP'&&captureRunning);
-    if(state.command==='ANALYZE_PCAP'&&state.status==='completed'&&state.finished!==lastReportAction){
+    if(['ANALYZE_PCAP','FULL_LAB_SEQUENCE'].includes(state.command)&&state.status==='completed'&&state.finished!==lastReportAction){
       lastReportAction=state.finished;selectedReport=null;await refresh();
     }
   }catch(error){$('action-status').textContent='Action status unavailable: '+error.message}
 }
 let lastReportAction=null;
 let captureRunning=false;
+let fullSequenceRunning=false;
 async function refreshCapture(){
   if(role!=='attacker')return;
   try{
     const response=await fetch('/api/capture/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);
     const state=await response.json();captureRunning=state.status==='capturing';
     $('capture-status').textContent=(state.file||'Capture')+' · '+state.status+' · '+state.detail+' · '+(state.bytes||0)+' bytes';
-    document.querySelector('[data-capture="start"]').disabled=captureRunning;
-    document.querySelector('[data-capture="stop"]').disabled=!captureRunning;
+    document.querySelector('[data-capture="start"]').disabled=captureRunning||fullSequenceRunning;
+    document.querySelector('[data-capture="stop"]').disabled=!captureRunning||fullSequenceRunning;
     const analyze=document.querySelector('[data-action="ANALYZE_PCAP"]');
     analyze.disabled=captureRunning||document.querySelector('[data-action="PING"]').disabled;
   }catch(error){$('capture-status').textContent='Capture status unavailable: '+error.message}
@@ -828,6 +882,10 @@ def serve(role, port):
                 return
             path = urlsplit(self.path).path
             if path in {"/api/capture/start", "/api/capture/stop"}:
+                current = controller.status()
+                if current["status"] == "running" and current["command"] == "FULL_LAB_SEQUENCE":
+                    self._json_response(409, {"error": "Full lab sequence owns this capture"})
+                    return
                 try:
                     state = capture.start() if path.endswith("/start") else capture.stop()
                 except (RuntimeError, ValueError, OSError) as exc:
