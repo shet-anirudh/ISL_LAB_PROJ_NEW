@@ -1,0 +1,15 @@
+{
+  "algorithm": "RSA-PSS-SHA256",
+  "source": "results/defense_evaluation_20261029T130743Z.json",
+  "source_bytes": 5351,
+  "sha256": "ad0530ca2560ec507ffc4cd747c0247490422242b223936201fbff9dacf89761",
+  "public_key_sha256": "d6d99e34ae9966796deaf75180b1ead5db163bb6dbefdc070c9b606e8634475f",
+  "signature_base64": "9dTDrt9PrJdyB5Wf9GGaJyMWpBVkMWV1WPiRx4oTwbXkBER5SCCEInabT8psUNgh2kgLMLzv9bAG27lQzL2dvYC2t31ak3PrFddLFai2YEDETJUxmga9YK39DPYbQog08gA/vTcsG4rvjzY2TsJ90FtTm/yLYY01QChfQPgR6I+hMVY1o5HaF/bBA2st8Y4402kFLUYWDCd+aQZE9Tx6v7ymLuMxZutXscgGcdNiJyMOzbE0qJRv55bZKxXAlqmenJQObS3NXTUJ+ntGWh2J6jL0YGml0gaj98PudemvH7U3ns5Mp+V3M3ijovWiFzZ7Gh+NXOQWlpjgEBVz6kIh3g==",
+  "timings_ms_median": {
+    "sha256": 0.003619,
+    "sign": 0.550809,
+    "verify": 0.027482
+  },
+  "trials": 10,
+  "tampered_byte_rejected": true
+}
