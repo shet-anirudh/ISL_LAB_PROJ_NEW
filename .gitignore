@@ -5,3 +5,5 @@ islab-env/
 keys/
 logs/
 results/
+
+/received/
