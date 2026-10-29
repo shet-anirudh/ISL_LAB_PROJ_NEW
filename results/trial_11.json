@@ -1,0 +1,21 @@
+{
+  "trial_id": 11,
+  "config": "without_honeypot",
+  "honeypot_enabled": false,
+  "detection_latency_honeypot_ms": null,
+  "detection_latency_traffic_ms": 1619.3413102406103,
+  "containment_latency_ms": null,
+  "files_saved_ratio": 0.0,
+  "total_files": 40,
+  "files_encrypted": 40,
+  "encryption_throughput_mb_s": {
+    "docx": 45.04432086155665,
+    "xlsx": 48.01443739888795,
+    "pdf": 46.53383580247352,
+    "jpg": 52.057569781003416,
+    "mp3": 60.58402309006739,
+    "mp4": 65.59239351391375
+  },
+  "exfiltration_volume_bytes": 1025202,
+  "timestamp": "2026-10-29T05:55:12.347675+00:00"
+}
