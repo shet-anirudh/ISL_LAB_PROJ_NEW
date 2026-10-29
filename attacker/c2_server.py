@@ -78,7 +78,8 @@ def serve_relay_once():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cmd", choices=("PING", "STOP", "START_ENCRYPT", "START_EXFIL"), default="PING")
+    parser.add_argument("--cmd", choices=("PING", "STOP", "START_ENCRYPT", "START_EXFIL",
+                                          "VERIFY_DATASET", "RUN_BACKUP", "RESTORE_TRIAL"), default="PING")
     parser.add_argument("--unsigned", action="store_true", help="Test unsigned-command rejection")
     parser.add_argument("--relay-demo", action="store_true", help="Accept a separate dry-run STOP sender")
     args = parser.parse_args()
