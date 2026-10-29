@@ -1,7 +1,7 @@
 {
   "algorithm": "sha256",
   "files": {
-    "01_Operations/logistics.xlsx": "650750a46c4f62b77ee22800b8639cb2ecc177976f22901699c6c87683d11207",
+    "01_Operations/logistics.xlsx": "c944a42db6a4bee032d0fb7c71796d82a72784e72d3fdfa8c24f217973677a14",
     "01_Operations/mission_brief.txt": "7ee7b32fa7e543d5f4c8beb858e04a03a627a690b40821f678424f24741a655d",
     "01_Operations/report.pdf": "db0cd3713c43983eabab0b6f7fc6c41fb979970a9624a795b578059b0af987a5",
     "01_Operations/schedule.txt": "6b9beef478c6a4553bb23b45a1245dc13816b0ec68bfd55e3919108c29c3fbb0",
@@ -16,7 +16,7 @@
     "03_Media/training_marker.ppm": "c595b661758c429a2f125d1c39344727f34cbd1d521da9ba0715abe2145e2491",
     "A_COMMAND_ARCHIVE/briefing.mp3": "904887197be6fad1ee45ec45a941f6eec7b9a5d10b64d0253d11bee78ca05138",
     "A_COMMAND_ARCHIVE/command_index.txt": "e2a88349345ffced34c9298209e0565f01575f714e6d6b318ef005a8dee01ca7",
-    "A_COMMAND_ARCHIVE/logistics.xlsx": "ff2a8c0dd04fd668845da81265db1f55cc7f5dc9b3b3128f373888ab4b6c0e23",
+    "A_COMMAND_ARCHIVE/logistics.xlsx": "f68172e9c61f021be927cda783f1e468c666c536e22d89899a1bb99c51575896",
     "A_COMMAND_ARCHIVE/marker.jpg": "b81ff64f615a444f7ca46968750edd36f14e92a03371dedeb66d58980c42dbb3",
     "A_COMMAND_ARCHIVE/priority_memo.txt": "70a06326658d0f1573ea5a0de313e94cf1f508835ba472c41a08b5d9c6ef16aa",
     "A_COMMAND_ARCHIVE/report.pdf": "6314c5a017635f8a7d3dcc8d2a2113f095adb9996f4657d3cea40a87f0d88e6f",

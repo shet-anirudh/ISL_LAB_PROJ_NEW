@@ -13,6 +13,7 @@ import io
 import json
 import math
 import os
+import re
 import subprocess
 import tempfile
 import wave
@@ -65,7 +66,11 @@ def normalize_xlsx(raw):
             info = zipfile.ZipInfo(item.filename, STAMP)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = item.external_attr
-            zout.writestr(info, zin.read(item.filename))
+            data = zin.read(item.filename)
+            if item.filename == "docProps/core.xml":
+                data = re.sub(rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)",
+                              rb"\g<1>2025-01-01T00:00:00Z\2", data)
+            zout.writestr(info, data)
     return result.getvalue()
 
 
