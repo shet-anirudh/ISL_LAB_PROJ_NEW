@@ -5,6 +5,7 @@ Creates a new results/simtrial-* directory. Never edits MILITARY_DATA.
 """
 
 import hashlib
+import argparse
 import json
 import os
 import shutil
@@ -47,7 +48,7 @@ def _copy_non_targets(source, trial, target_set):
                 shutil.copy2(path, destination / name)
 
 
-def simulate():
+def simulate(*, step_delay=0, gate_file=None):
     source = Path(TEST_DATA_DIR).absolute()
     decoy = Path(HONEYPOT_DIR).absolute()
     if source != Path.home() / "MILITARY_DATA" or decoy != source / "A_COMMAND_ARCHIVE":
@@ -63,6 +64,16 @@ def simulate():
     trial = Path(tempfile.mkdtemp(prefix="simtrial-", dir=results))
     started = time.perf_counter()
     _copy_non_targets(source, trial, target_set)
+    if gate_file is not None:
+        gate = Path(gate_file).absolute()
+        if gate.parent != results or gate.is_symlink() or gate.exists():
+            raise ValueError("Start gate must be a new file directly inside results")
+        deadline = time.monotonic() + 10
+        print(f"Trial ready; waiting for {gate}", flush=True)
+        while not gate.is_file():
+            if time.monotonic() > deadline:
+                raise TimeoutError("Integration start gate was not released")
+            time.sleep(0.01)
     records = []
     for kind, name in plan:
         original = source / name
@@ -88,6 +99,8 @@ def simulate():
                   "key_sidecar": sidecar.relative_to(trial).as_posix()}
         records.append(record)
         append_log("synthetic_file_encrypted", trial=str(trial), **record)
+        if step_delay:
+            time.sleep(step_delay)
     note = trial / "SIMULATION_README.txt"
     note.write_text("SYNTHETIC LAB TRIAL ONLY. The original MILITARY_DATA is unchanged.\n",
                     encoding="utf-8")
@@ -100,7 +113,14 @@ def simulate():
 
 
 def main():
-    trial, records = simulate()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--step-delay", type=float, default=0,
+                        help="Pause after each copy for a controlled containment trial")
+    parser.add_argument("--gate-file", help="Wait for this new results file before encrypting copies")
+    args = parser.parse_args()
+    if not 0 <= args.step_delay <= 5:
+        parser.error("--step-delay must be between 0 and 5 seconds")
+    trial, records = simulate(step_delay=args.step_delay, gate_file=args.gate_file)
     print(f"PASS: created {len(records)} encrypted synthetic copies in {trial}")
     print(f"First target: {records[0]['kind']} {records[0]['file']}")
     print("Original MILITARY_DATA was not modified")
