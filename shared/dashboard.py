@@ -111,6 +111,7 @@ def _security_data():
     """Read bounded, locally generated measurement summaries for the UI."""
     results = ROOT / "results"
     text_result = _json_file(results / "text_security.json", {})
+    hash_result = _json_file(results / "hash_security.json", {})
     image_dirs = [p for p in results.glob("image_security_*")
                   if p.is_dir() and not p.is_symlink()]
     image_dir = max(image_dirs, key=lambda p: p.stat().st_mtime_ns) if image_dirs else None
@@ -130,6 +131,9 @@ def _security_data():
         "text": {key: text_result.get(key) for key in
                  ("plaintext", "ciphertext_base64", "recovered_plaintext", "timings_ms_median",
                   "diffusion_one_plaintext_bit", "confusion_one_key_bit")},
+        "hash": {key: hash_result.get(key) for key in
+                 ("digest_hex", "generation_time_ms_median",
+                  "one_input_bit_digest_change_pct_median", "bounded_search", "definitions", "limit")},
         "image": {"metrics": image_result.get("metrics"),
                   "timings_ms_median": image_result.get("timings_ms_median"),
                   "previews_available": image_dir is not None and all(
@@ -327,10 +331,10 @@ function metricRow(container,label,value){const row=el('div','row');row.append(e
 function section(parent,title){const box=el('div','');box.append(el('h3','',title));parent.append(box);return box}
 let lastSecurity='';
 function drawSecurity(data){
-  const sec=data.security||{},text=sec.text||{},im=sec.image||{},audio=sec.audio||{},ev=sec.evaluation||{},sig=sec.signature||{},crypto=sec.crypto||{};
+  const sec=data.security||{},text=sec.text||{},hash=sec.hash||{},im=sec.image||{},audio=sec.audio||{},ev=sec.evaluation||{},sig=sec.signature||{},crypto=sec.crypto||{};
   const fingerprint=JSON.stringify(sec)+data.role;if(fingerprint===lastSecurity)return;lastSecurity=fingerprint;
   const panel=$('security-panel'),root=$('security');root.replaceChildren();
-  const has=Boolean(text.plaintext||im.metrics||audio.sha256||ev.summary||sig.sha256||Object.keys(crypto).length);panel.hidden=!has;if(!has)return;
+  const has=Boolean(text.plaintext||hash.digest_hex||im.metrics||audio.sha256||ev.summary||sig.sha256||Object.keys(crypto).length);panel.hidden=!has;if(!has)return;
   if(text.plaintext){
     const box=section(root,'Text encryption and one-bit changes');
     for(const [label,value] of [['Plaintext',text.plaintext],['Ciphertext (Base64)',text.ciphertext_base64],['Recovered',text.recovered_plaintext]]){
@@ -340,6 +344,17 @@ function drawSecurity(data){
     measurement(box,'Diffusion, ciphertext bits',diffusion.summary&&diffusion.summary.bit_change_pct_median,100,'%');
     measurement(box,'Confusion, ciphertext bits',confusion.summary&&confusion.summary.bit_change_pct_median,100,'%');
     box.append(el('p','measure-note','One plaintext bit or one key bit changes with fixed IV. Bars show measured ciphertext Hamming distances.'));
+  }
+  if(hash.digest_hex){
+    const box=section(root,'SHA-256 digest and properties');
+    box.append(el('div','label','Synthetic mission brief digest'),el('pre','',hash.digest_hex));
+    metricRow(box,'Median digest generation',hash.generation_time_ms_median+' ms');
+    measurement(box,'One input-bit digest change',hash.one_input_bit_digest_change_pct_median,100,'%');
+    const definitions=hash.definitions||{},search=hash.bounded_search||{};
+    for(const [name,label] of [['preimage_resistance','Pre-image'],['second_preimage_resistance','Second pre-image'],['collision_resistance','Collision']]){
+      metricRow(box,label,definitions[name]||'');
+    }
+    box.append(el('p','measure-note','Bounded '+search.candidates+'-candidate search: pre-image '+Boolean(search.preimage_found)+', second pre-image '+Boolean(search.second_preimage_found)+', collision '+Boolean(search.collision_found)+'. '+(hash.limit||'')));
   }
   if(im.metrics){
     const box=section(root,'RGB image measurements'),m=im.metrics;
