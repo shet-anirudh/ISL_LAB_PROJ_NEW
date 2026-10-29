@@ -1,0 +1,25 @@
+{
+  "algorithm": "sha256",
+  "files": {
+    "01_Operations/logistics.xlsx": "650750a46c4f62b77ee22800b8639cb2ecc177976f22901699c6c87683d11207",
+    "01_Operations/mission_brief.txt": "7ee7b32fa7e543d5f4c8beb858e04a03a627a690b40821f678424f24741a655d",
+    "01_Operations/report.pdf": "db0cd3713c43983eabab0b6f7fc6c41fb979970a9624a795b578059b0af987a5",
+    "01_Operations/schedule.txt": "6b9beef478c6a4553bb23b45a1245dc13816b0ec68bfd55e3919108c29c3fbb0",
+    "01_Operations/supply_log.csv": "f5d8072337619db79eb3ffc68336ea71e77d8a2d047b3de4c1b51d7d407192df",
+    "02_Intelligence/field_notes.txt": "d5974a20960afaf478690c2c199faac6cb27f01d095556279cca9fd9ad29f4d9",
+    "02_Intelligence/marker.jpg": "c89b44fb129a6d0bf24233f559dc6313e6c094381e06155318cbe93eab2d33b6",
+    "02_Intelligence/observations.csv": "bb1af34b5a38d7962944c7bf1cfc8a1958d3f8b76df2ffdb45325f9009a58b0f",
+    "02_Intelligence/summary.txt": "ad91093c0446554d3aa73bb38f58d9c1dc612925b3fcf9c28156b65a6f4ee720",
+    "03_Media/README.txt": "891016848cb434dca670eee0de64f5b850a4f0f1523eeb74f3950b0391a211e9",
+    "03_Media/briefing.mp3": "d3e976046ea5dc33589b4a45c2a2e1a88a29d555a4bb1907f4d93aba0f4de8b8",
+    "03_Media/training.mp4": "e4c3a0cdccd6f74c4d21f489fe12e1a9c583573b09475b04122f150c45c6844a",
+    "03_Media/training_marker.ppm": "c595b661758c429a2f125d1c39344727f34cbd1d521da9ba0715abe2145e2491",
+    "A_COMMAND_ARCHIVE/briefing.mp3": "904887197be6fad1ee45ec45a941f6eec7b9a5d10b64d0253d11bee78ca05138",
+    "A_COMMAND_ARCHIVE/command_index.txt": "e2a88349345ffced34c9298209e0565f01575f714e6d6b318ef005a8dee01ca7",
+    "A_COMMAND_ARCHIVE/logistics.xlsx": "ff2a8c0dd04fd668845da81265db1f55cc7f5dc9b3b3128f373888ab4b6c0e23",
+    "A_COMMAND_ARCHIVE/marker.jpg": "b81ff64f615a444f7ca46968750edd36f14e92a03371dedeb66d58980c42dbb3",
+    "A_COMMAND_ARCHIVE/priority_memo.txt": "70a06326658d0f1573ea5a0de313e94cf1f508835ba472c41a08b5d9c6ef16aa",
+    "A_COMMAND_ARCHIVE/report.pdf": "6314c5a017635f8a7d3dcc8d2a2113f095adb9996f4657d3cea40a87f0d88e6f",
+    "A_COMMAND_ARCHIVE/training.mp4": "b070a16536ee94288bffb62a3cda01ec29c19d26beb38c5739bf59de08bb21c3"
+  }
+}
