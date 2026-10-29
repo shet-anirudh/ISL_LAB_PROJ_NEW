@@ -342,8 +342,10 @@ function drawSecurity(data){
     }
     const diffusion=text.diffusion_one_plaintext_bit||{},confusion=text.confusion_one_key_bit||{};
     measurement(box,'Diffusion, ciphertext bits',diffusion.summary&&diffusion.summary.bit_change_pct_median,100,'%');
+    measurement(box,'Diffusion, ciphertext hex digits',diffusion.summary&&diffusion.summary.hex_character_change_pct_median,100,'%');
     measurement(box,'Confusion, ciphertext bits',confusion.summary&&confusion.summary.bit_change_pct_median,100,'%');
-    box.append(el('p','measure-note','One plaintext bit or one key bit changes with fixed IV. Bars show measured ciphertext Hamming distances.'));
+    measurement(box,'Confusion, ciphertext hex digits',confusion.summary&&confusion.summary.hex_character_change_pct_median,100,'%');
+    box.append(el('p','measure-note','One plaintext bit or one key bit changes with fixed IV. Hex digits are ciphertext representation, not plaintext characters.'));
   }
   if(hash.digest_hex){
     const box=section(root,'SHA-256 digest and properties');
@@ -360,8 +362,9 @@ function drawSecurity(data){
     const box=section(root,'RGB image measurements'),m=im.metrics;
     measurement(box,'Original entropy',m.entropy_original_bits_per_byte,8,'bits/byte');
     measurement(box,'Encrypted entropy',m.entropy_encrypted_bits_per_byte,8,'bits/byte');
+    measurement(box,'NPCR, changed pixels',m.npcr_ciphertexts_one_plaintext_bit_pct,100,'%');
+    measurement(box,'UACI, mean channel difference',m.uaci_ciphertexts_one_plaintext_bit_pct,100,'%');
     for(const [label,key,unit] of [
-      ['NPCR','npcr_ciphertexts_one_plaintext_bit_pct','%'],['UACI','uaci_ciphertexts_one_plaintext_bit_pct','%'],
       ['Original neighbor correlation','horizontal_red_correlation_original',''],
       ['Encrypted neighbor correlation','horizontal_red_correlation_encrypted',''],
       ['Original to encrypted MSE','mse_original_to_encrypted',''],['Original to encrypted PSNR','psnr_original_to_encrypted_db','dB'],
