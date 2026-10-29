@@ -198,10 +198,11 @@ def _attacker():
         allowed.setdefault(Path(name).name, set()).add(digest)
     recovered = []
     if received.is_dir() and not received.is_symlink():
-        for path in sorted(received.iterdir()):
+        for path in sorted(received.rglob("*")):
             if path.is_file() and not path.is_symlink():
                 try:
-                    recovered.append({"name": path.name, "bytes": path.stat().st_size,
+                    recovered.append({"name": path.relative_to(received).as_posix(),
+                                      "bytes": path.stat().st_size,
                                       "valid": _sha256(path) in allowed.get(path.name, set())})
                 except OSError:
                     pass

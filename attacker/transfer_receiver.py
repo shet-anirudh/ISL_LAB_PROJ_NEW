@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import os
 import socket
 import time
 from datetime import datetime, timezone
@@ -51,16 +52,19 @@ def receive_once():
             digest = hashlib.sha256(plaintext).hexdigest()
             if digest != expected_hashes.get(name):
                 raise ValueError("Recovered file differs from committed dataset baseline")
-            destination = output_dir / Path(name).name
-            if destination.is_symlink():
-                raise ValueError("Destination is a symlink")
+            # A fresh directory preserves prior demo evidence and permits
+            # repeated trials without overwriting earlier recovered files.
+            run_dir = output_dir / f"run-{time.time_ns()}-{os.urandom(3).hex()}"
+            run_dir.mkdir(mode=0o700)
+            destination = run_dir / Path(name).name
             with destination.open("xb") as output:
                 output.write(plaintext)
             elapsed = round(time.perf_counter() - started, 4)
             record = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
                       "module": "transfer", "event": "file_received", "file": name,
                       "bytes": len(plaintext), "sha256": digest, "elapsed_s": elapsed,
-                      "src_ip": address[0], "src_port": address[1]}
+                      "src_ip": address[0], "src_port": address[1],
+                      "saved_as": destination.relative_to(root).as_posix()}
             log_dir = Path(LOG_DIR)
             if log_dir.is_symlink():
                 raise ValueError("Log directory is a symlink")
