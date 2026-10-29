@@ -6,19 +6,24 @@ Launch through ``python3 -m attacker.dashboard`` on Kali or
 
 import argparse
 import hashlib
+import hmac
 import json
+import ssl
+import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
+from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
-from config import LOG_DIR, PROJECT_ROOT, TEST_DATA_DIR
+from config import ATTACKER_IP, HMAC_SECRET, LOG_DIR, PROJECT_ROOT, TEST_DATA_DIR, VICTIM_IP
 
 
 ROOT = Path(PROJECT_ROOT)
 LOGS = Path(LOG_DIR)
 MAX_LOG_BYTES = 2 * 1024 * 1024
 MAX_EVENTS = 24
+TELEMETRY_PORT = 9083
 
 
 def _json_file(path, default):
@@ -79,7 +84,7 @@ def _event_feed(groups):
             rows.append({"ts": str(event.get("ts", "")),
                          "module": str(event.get("module", ""))[:30],
                          "event": str(event.get("event", ""))[:50],
-                         "detail": str(event.get("file") or event.get("cmd") or
+                         "detail": str(event.get("detail") or event.get("file") or event.get("cmd") or
                                        event.get("reason") or event.get("trial") or
                                        event.get("pid") or "")[:160]})
     rows.sort(key=lambda row: row["ts"].replace("+00:00", "Z"), reverse=True)
@@ -139,6 +144,9 @@ def _victim():
             {"label": "Backup snapshots", "value": len(snapshots), "note": latest_backup},
         ],
         "trial": trial,
+        "telemetry": {"intact": bool(baseline) and intact == len(baseline),
+                      "stops": len(kills), "alerts": len(honeypot),
+                      "backups": len(snapshots)},
         "summary": [
             {"label": "Dataset", "value": "Matches baseline" if baseline and intact == len(baseline) else "Attention required"},
             {"label": "Latest trial", "value": "None" if trial is None else trial["name"] + (" · complete" if trial["complete"] else " · interrupted/in progress")},
@@ -149,6 +157,35 @@ def _victim():
         ],
         "events": _event_feed([honeypot, containment, simulator, transfer, c2]),
     }
+
+
+def _token():
+    if not isinstance(HMAC_SECRET, bytes) or len(HMAC_SECRET) < 16:
+        raise ValueError("A shared HMAC_SECRET of at least 16 bytes is required")
+    return hmac.new(HMAC_SECRET, b"islab-dashboard-telemetry-v1",
+                    hashlib.sha256).hexdigest()
+
+
+def _remote_victim():
+    """Fetch read-only victim telemetry with pinned TLS and a shared token."""
+    cert = ROOT / "keys" / "backup.crt"
+    try:
+        context = ssl.create_default_context(cafile=str(cert))
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context))
+        request = Request(f"https://{VICTIM_IP}:{TELEMETRY_PORT}/api/status",
+                          headers={"X-ISLab-Telemetry": _token()})
+        with opener.open(request, timeout=1.5) as response:
+            raw = response.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            return None
+        data = json.loads(raw)
+        if (not isinstance(data, dict) or data.get("role") != "victim" or
+                not isinstance(data.get("telemetry"), dict)):
+            return None
+        return data
+    except (OSError, ValueError, ssl.SSLError):
+        return None
 
 
 def _attacker():
@@ -171,6 +208,12 @@ def _attacker():
     verified = sum(item["valid"] for item in recovered)
     responses = [e for e in c2 if e.get("event") == "response_received"]
     rejects = sum(e.get("event") == "spoof_rejected" for e in c2)
+    remote = _remote_victim()
+    remote_info = remote["telemetry"] if remote else {}
+    trial = remote.get("trial") if remote else None
+    remote_events = [] if not remote else [
+        {**event, "module": "victim / " + str(event.get("module", ""))}
+        for event in remote.get("events", []) if isinstance(event, dict)]
     return {
         "role": "attacker", "title": "Attacker Activity", "updated": _now(),
         "cards": [
@@ -178,15 +221,23 @@ def _attacker():
             {"label": "Received transfers", "value": sum(e.get("event") == "file_received" for e in transfer), "note": "Historical verified events"},
             {"label": "C2 responses", "value": len(responses), "note": "Commands are dry-run"},
             {"label": "Spoof attempts blocked", "value": rejects, "note": "Authenticated relay demo"},
+            {"label": "Victim confirmed stops", "value": remote_info.get("stops", "—"),
+             "note": "Live victim telemetry" if remote else "Victim telemetry unavailable"},
+            {"label": "Victim latest trial", "value": "—" if trial is None else
+             str(trial.get("decoy", 0)) + " / " + str(trial.get("real", 0)),
+             "note": "Decoy / real encrypted copies" if trial else "No live trial data"},
         ],
         "files": recovered,
         "summary": [
             {"label": "Last C2 response", "value": "None" if not responses else str(responses[-1].get("cmd", "")) + " · " + str(responses[-1].get("requested", ""))},
             {"label": "Signed commands sent", "value": str(sum(e.get("event") == "command_sent" and e.get("signed") is True for e in c2))},
             {"label": "Bytes recovered", "value": f"{sum(item['bytes'] for item in recovered):,}"},
-            {"label": "Simulation detail", "value": "Encryption trial logs are on the victim VM"},
+            {"label": "Victim telemetry", "value": "Connected · " + remote.get("updated", "") if remote else "Unavailable · start victim dashboard"},
+            {"label": "Victim dataset", "value": "Baseline intact" if remote_info.get("intact") else
+             "Attention required" if remote else "Unavailable"},
+            {"label": "Latest victim trial", "value": trial.get("name", "Unknown") if trial else "None reported"},
         ],
-        "events": _event_feed([transfer, c2]),
+        "events": _event_feed([transfer, c2, remote_events]),
     }
 
 
@@ -211,7 +262,7 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 .scroll{max-height:390px;overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}th{color:#8fa6ba;font-weight:650;position:sticky;top:0;background:#142235}td,th{padding:11px 9px;border-bottom:1px solid #26374a;vertical-align:top}td{overflow-wrap:anywhere}.ok{color:#65dec2}.bad{color:#ff9b83}
 @media(max-width:850px){.cards{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.wide{grid-column:auto}}@media(max-width:520px){.cards{grid-template-columns:1fr 1fr}.card{padding:14px}.value{font-size:27px}main{padding:20px 14px}.pill{display:none}}
 </style></head><body><main>
-<header><div><div class="eyebrow">IS Lab · Synthetic Environment</div><h1 id="title">Dashboard</h1><div class="muted" id="updated">Loading local evidence…</div></div><span class="pill">READ ONLY · LOCAL VM</span></header>
+<header><div><div class="eyebrow">IS Lab · Synthetic Environment</div><h1 id="title">Dashboard</h1><div class="muted" id="updated">Loading local evidence…</div></div><span class="pill">READ ONLY · LAB VM</span></header>
 <section class="cards" id="cards"></section><div class="grid"><section class="panel"><h2>Activity summary</h2><div id="summary"></div></section>
 <section class="panel"><h2 id="chart-title">Latest trial</h2><div class="bars" id="visual"></div></section>
 <section class="panel wide"><h2>Recent recorded events</h2><div class="scroll"><table><thead><tr><th>Time (UTC)</th><th>Module</th><th>Event</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table></div></section></div>
@@ -228,6 +279,44 @@ const table=$('events');table.replaceChildren();for(const event of data.events){
 async function refresh(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);draw(await response.json())}catch(error){$('updated').textContent='Dashboard data unavailable: '+error.message}}
 refresh();setInterval(refresh,4000);
 </script></body></html>'''
+
+
+def _telemetry_server():
+    class TelemetryHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if (urlsplit(self.path).path != "/api/status" or
+                    self.client_address[0] != ATTACKER_IP or
+                    not hmac.compare_digest(self.headers.get("X-ISLab-Telemetry", ""), _token())):
+                self.send_error(403)
+                return
+            try:
+                body = json.dumps(_victim()).encode("utf-8")
+            except (OSError, ValueError):
+                self.send_error(500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    _token()  # Fail before binding when the shared secret is not configured.
+    server = ThreadingHTTPServer((VICTIM_IP, TELEMETRY_PORT), TelemetryHandler)
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(str(ROOT / "keys" / "backup.crt"),
+                                str(Path.home() / ".config" / "islab" / "backup.key"))
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        return server
+    except Exception:
+        server.server_close()
+        raise
 
 
 def serve(role, port):
@@ -260,9 +349,22 @@ def serve(role, port):
         def log_message(self, format, *args):
             pass
 
-    with ThreadingHTTPServer(("127.0.0.1", port), Handler) as server:
-        print(f"{role.title()} dashboard: http://127.0.0.1:{port}/ (Ctrl+C to stop)", flush=True)
-        server.serve_forever()
+    telemetry = _telemetry_server() if role == "victim" else None
+    thread = None
+    try:
+        if telemetry is not None:
+            thread = threading.Thread(target=telemetry.serve_forever, daemon=True)
+            thread.start()
+            print(f"Victim telemetry: TLS on {VICTIM_IP}:{TELEMETRY_PORT}", flush=True)
+        with ThreadingHTTPServer(("127.0.0.1", port), Handler) as server:
+            print(f"{role.title()} dashboard: http://127.0.0.1:{port}/ (Ctrl+C to stop)", flush=True)
+            server.serve_forever()
+    finally:
+        if telemetry is not None:
+            telemetry.shutdown()
+            telemetry.server_close()
+            if thread is not None:
+                thread.join(timeout=3)
 
 
 def main(default_role=None):
