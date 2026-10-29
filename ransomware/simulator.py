@@ -81,19 +81,26 @@ def simulate(*, step_delay=0, gate_file=None):
             raise ValueError(f"Missing or unsafe synthetic file: {original}")
         data = original.read_bytes()
         key, iv = generate_aes_key(), generate_iv()
+        encrypt_started = time.perf_counter_ns()
         ciphertext = aes_encrypt(data, iv, key)
+        encrypt_ms = round((time.perf_counter_ns() - encrypt_started) / 1e6, 6)
         if aes_decrypt(ciphertext, iv, key) != data:
             raise AssertionError(f"Encryption round trip failed: {name}")
+        wrap_started = time.perf_counter_ns()
         wrapped = rsa_wrap_key(key, RSA_PUB_KEY_PATH)
+        wrap_ms = round((time.perf_counter_ns() - wrap_started) / 1e6, 6)
         dest = trial / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         locked = dest.with_name(dest.name + ".locked")
         sidecar = dest.with_name(dest.name + ".key")
+        write_started = time.perf_counter_ns()
         with locked.open("xb") as output:
             output.write(iv + ciphertext)
         with sidecar.open("xb") as output:
             output.write(wrapped)
+        write_ms = round((time.perf_counter_ns() - write_started) / 1e6, 6)
         record = {"kind": kind, "file": name, "bytes": len(data),
+                  "encrypt_ms": encrypt_ms, "wrap_ms": wrap_ms, "write_ms": write_ms,
                   "sha256_original": hashlib.sha256(data).hexdigest(),
                   "locked": locked.relative_to(trial).as_posix(),
                   "key_sidecar": sidecar.relative_to(trial).as_posix()}

@@ -11,9 +11,11 @@ import hmac
 import json
 import secrets
 import ssl
+import statistics
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -81,14 +83,17 @@ class ActionController:
             self.state["steps"].append({"name": label, "status": "running", "detail": "In progress"})
             self.state["detail"] = label
             index = len(self.state["steps"]) - 1
+        started = time.perf_counter_ns()
         try:
             result = operation()
         except Exception as exc:
             with self.lock:
-                self.state["steps"][index].update(status="failed", detail=str(exc)[:180])
+                self.state["steps"][index].update(status="failed", detail=str(exc)[:180],
+                                                  duration_ms=round((time.perf_counter_ns()-started)/1e6, 3))
             raise
         with self.lock:
-            self.state["steps"][index].update(status="completed", detail=str(result)[:180])
+            self.state["steps"][index].update(status="completed", detail=str(result)[:180],
+                                              duration_ms=round((time.perf_counter_ns()-started)/1e6, 3))
         return result
 
     def _full_sequence(self):
@@ -98,12 +103,15 @@ class ActionController:
         try:
             name = self._step("Start PCAP capture", lambda: self.capture.start()["file"])
             started = True
+            self._step("Verified TLS backup", lambda: self._remote("RUN_BACKUP"))
             self._step("Contained trial", lambda: self._remote("START_ENCRYPT"))
             self._step("Synthetic PDF transfer", lambda: self._remote("START_EXFIL"))
             self._step("Verify original dataset", lambda: self._remote("VERIFY_DATASET"))
+            self._step("Isolated restore trial", lambda: self._remote("RESTORE_TRIAL"))
             self._step("Stop PCAP capture", lambda: self.capture.stop()["file"])
             started = False
             report = self._step("Analyze and report", lambda: self._analyze(self.capture.path))
+            self._step("Verify signed evaluation", self._verify_signature)
             return f"Full synthetic sequence completed; {name}; {report}"
         except Exception:
             if started and self.capture.is_running():
@@ -122,8 +130,11 @@ class ActionController:
             capture = max(captures, key=lambda p: p.stat().st_mtime_ns)
         report_name = None
         for module in ("analysis.pcap_parser", "analysis.forensic_report"):
+            started = time.perf_counter_ns()
             result = subprocess.run([sys.executable, "-m", module, str(capture)],
                                     cwd=ROOT, capture_output=True, text=True, timeout=60)
+            _append_dashboard_timing(module, round((time.perf_counter_ns()-started)/1e6, 3),
+                                     result.returncode == 0)
             if result.returncode:
                 raise RuntimeError(f"{module}: {(result.stderr or result.stdout)[-180:]}")
             if module == "analysis.forensic_report":
@@ -145,13 +156,17 @@ class ActionController:
         source = _json_file(newest, {}).get("source")
         if not isinstance(source, str) or not source.startswith("results/defense_evaluation_"):
             raise ValueError("Signature record does not identify a synthetic evaluation")
+        started = time.perf_counter_ns()
         result = subprocess.run([sys.executable, "-m", "tests.signature_demo", "--verify", source],
                                 cwd=ROOT, capture_output=True, text=True, timeout=20)
+        _append_dashboard_timing("signature_verify_file", round((time.perf_counter_ns()-started)/1e6, 3),
+                                 result.returncode == 0)
         if result.returncode:
             raise RuntimeError((result.stderr or result.stdout)[-180:])
         return f"Verified RSA-PSS signature for {Path(source).name}"
 
     def _remote(self, command):
+        started = time.perf_counter_ns()
         receiver_thread = None
         receiver_result = {}
         try:
@@ -172,6 +187,9 @@ class ActionController:
                     raise RuntimeError(receiver_result.get("error", "Transfer receiver did not start"))
             from attacker.c2_server import serve_once
             response = serve_once(command, accept_timeout=20)
+            _append_dashboard_timing("c2_" + command.lower(),
+                                     round((time.perf_counter_ns()-started)/1e6, 3),
+                                     response["cmd"] == "ACK")
             if response["cmd"] != "ACK":
                 raise RuntimeError(f"Victim rejected {command}: {response['data']}")
             data = response["data"]
@@ -238,6 +256,93 @@ def _events(name):
         return events
     except OSError:
         return []
+
+
+def _append_dashboard_timing(operation, duration_ms, successful):
+    """Record bounded wall-time measurements for dashboard-initiated stages."""
+    LOGS.mkdir(parents=True, exist_ok=True)
+    path = LOGS / "dashboard_timing.log"
+    if path.is_symlink():
+        raise ValueError("Timing log must not be a symlink")
+    row = {"ts": _now(), "module": "dashboard", "event": "stage_timed",
+           "operation": operation, "duration_ms": duration_ms, "successful": successful}
+    with path.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _performance_data(evaluation, crypto, text_result, image_result, audio_result, signature, hash_result):
+    """Expose observed measurements with source, units, and sample counts."""
+    rows = []
+
+    def add(group, label, value, unit, source, count=None):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            rows.append({"group": group, "label": label, "value": round(float(value), 6),
+                         "unit": unit, "source": source, "samples": count})
+
+    for label, result, group in (("Text", text_result, "Encryption / decryption"),
+                                  ("RGB pixels", image_result, "Encryption / decryption"),
+                                  ("MP3", audio_result, "Encryption / decryption")):
+        timings = result.get("timings_ms_median") or {}
+        for name in ("encrypt", "decrypt"):
+            add(group, label + " " + name, timings.get(name), "ms", "sample AES median", 10)
+    for kind, result in crypto.items():
+        if not isinstance(result, dict):
+            continue
+        for name in ("encrypt", "decrypt"):
+            add("File-level AES", kind.title() + " " + name,
+                result.get("aes_" + name + "_median_ms"), "ms", "file benchmark", 10)
+            add("AES throughput", kind.title() + " " + name,
+                result.get("aes_" + name + "_mib_per_s"), "MiB/s", "file benchmark", 10)
+        add("Key operations", kind.title() + " RSA wrap", result.get("rsa_wrap_median_ms"),
+            "ms", "file benchmark", 10)
+    add("Hashing", "SHA-256 digest", hash_result.get("generation_time_ms_median"),
+        "ms", "synthetic mission brief", hash_result.get("generation_trials"))
+    for key, label in (("sha256", "Artifact hash"), ("sign", "RSA-PSS sign"),
+                       ("verify", "RSA-PSS verify")):
+        add("Signature", label, (signature.get("timings_ms_median") or {}).get(key),
+            "ms", "signed evaluation", signature.get("trials"))
+    runs = evaluation.get("runs") or []
+    for key, label in (("alert_to_stop_ms", "Honeypot alert to stop"),
+                       ("kill_response_ms", "Containment kill response")):
+        values = [run[key] for run in runs if run.get("mode") == "with" and
+                  isinstance(run.get(key), (float, int))]
+        if values:
+            add("Honeypot / containment", label, statistics.median(values),
+                "ms", "monitored paired trials", len(values))
+    unmonitored = [run.get("elapsed_s") for run in runs if run.get("mode") == "without" and
+                   isinstance(run.get("elapsed_s"), (int, float))]
+    if unmonitored:
+        add("Ransomware trial", "Copy-only lock trial", statistics.median(unmonitored)*1000,
+            "ms", "unmonitored complete trials", len(unmonitored))
+    locked_files = [e for e in _events("simulator.log")
+                    if e.get("event") == "synthetic_file_encrypted"]
+    for key, label in (("encrypt_ms", "Per-file AES lock"),
+                       ("wrap_ms", "Per-file RSA key wrap"),
+                       ("write_ms", "Per-file locked copy write")):
+        values = [e[key] for e in locked_files if isinstance(e.get(key), (int, float))]
+        if values:
+            add("Ransomware trial", label, statistics.median(values),
+                "ms", "synthetic file log", len(values))
+    sent = [e.get("elapsed_s") for e in _events("transfer.log") if e.get("event") == "file_sent"
+            and isinstance(e.get("elapsed_s"), (int, float))]
+    if sent:
+        add("Transfer", "Encrypted file transfer", statistics.median(sent)*1000,
+            "ms", "victim transfer log", len(sent))
+    timings = _events("dashboard_timing.log")
+    for op, label, group in (("analysis.pcap_parser", "PCAP parse", "Forensics"),
+                             ("analysis.forensic_report", "Report generation", "Forensics"),
+                             ("signature_verify_file", "Artifact verification", "Signature"),
+                             ("c2_start_encrypt", "C2 contained trial round trip", "C2 workflow"),
+                             ("c2_start_exfil", "C2 transfer round trip", "C2 workflow"),
+                             ("c2_run_backup", "TLS backup round trip", "Backup / recovery"),
+                             ("c2_restore_trial", "Isolated restore round trip", "Backup / recovery"),
+                             ("c2_verify_dataset", "Dataset verification round trip", "Integrity")):
+        values = [e.get("duration_ms") for e in timings
+                  if e.get("operation") == op and e.get("successful") is True and
+                  isinstance(e.get("duration_ms"), (int, float))]
+        if values:
+            add(group, label, statistics.median(values), "ms", "Kali dashboard wall time", len(values))
+    return rows
 
 
 def _baseline():
@@ -310,10 +415,12 @@ def _security_data():
     return {
         "text": {key: text_result.get(key) for key in
                  ("plaintext", "ciphertext_base64", "recovered_plaintext", "timings_ms_median",
-                  "diffusion_one_plaintext_bit", "confusion_one_key_bit")},
+                  "diffusion_one_plaintext_bit", "confusion_one_key_bit", "algorithm",
+                  "iv_base64", "plaintext_bytes", "ciphertext_bytes", "metric_definition")},
         "hash": {key: hash_result.get(key) for key in
                  ("digest_hex", "generation_time_ms_median",
-                  "one_input_bit_digest_change_pct_median", "bounded_search", "definitions", "limit")},
+                  "one_input_bit_digest_change_pct_median", "digest_changed_bits_each_trial",
+                  "generation_trials", "source_bytes", "bounded_search", "definitions", "limit")},
         "image": {"metrics": image_result.get("metrics"),
                   "timings_ms_median": image_result.get("timings_ms_median"),
                   "previews_available": image_dir is not None and all(
@@ -327,10 +434,15 @@ def _security_data():
                   "playback_available": audio_dir is not None and
                   (audio_dir / "recovered.mp3").is_file() and
                   not (audio_dir / "recovered.mp3").is_symlink()},
-        "evaluation": {"pairs": evaluation.get("pairs"), "summary": evaluation.get("summary")},
+        "evaluation": {"pairs": evaluation.get("pairs"), "summary": evaluation.get("summary"),
+                       "runs": evaluation.get("runs", [])[:40]},
         "signature": {key: signature.get(key) for key in
-                      ("sha256", "signature_base64", "timings_ms_median", "tampered_byte_rejected")},
+                      ("algorithm", "source", "source_bytes", "sha256", "signature_base64",
+                       "public_key_sha256", "timings_ms_median", "tampered_byte_rejected", "trials")},
         "crypto": crypto.get("measurements", {}),
+        "performance": _performance_data(evaluation, crypto.get("measurements", {}),
+                                          text_result, image_result, audio_result,
+                                          signature, hash_result),
     }
 
 
@@ -458,6 +570,12 @@ def _attacker():
     remote_events = [] if not remote else [
         {**event, "module": "victim / " + str(event.get("module", ""))}
         for event in remote.get("events", []) if isinstance(event, dict)]
+    security = remote.get("security") if remote else _security_data()
+    security = dict(security or {})
+    local_performance = [row for row in _security_data().get("performance", [])
+                         if row.get("source") == "Kali dashboard wall time"]
+    security["performance"] = [row for row in security.get("performance", [])
+                               if row.get("source") != "Kali dashboard wall time"] + local_performance
     return {
         "role": "attacker", "title": "Attacker Activity", "updated": _now(),
         "cards": [
@@ -482,7 +600,7 @@ def _attacker():
             {"label": "Latest victim trial", "value": trial.get("name", "Unknown") if trial else "None reported"},
         ],
         "events": _event_feed([transfer, c2, remote_events]),
-        "security": remote.get("security") if remote else _security_data(),
+        "security": security,
         "reports": _reports(),
     }
 
@@ -507,26 +625,23 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 .bars{display:grid;gap:18px}.barhead{display:flex;justify-content:space-between;color:#b9cddd;font-size:13px;margin-bottom:7px}.track{height:10px;border-radius:8px;background:#28384b;overflow:hidden}.fill{height:100%;border-radius:8px;background:#42c9af;transition:width .3s}.fill.real{background:#ff9878}
 .scroll{max-height:390px;overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}th{color:#8fa6ba;font-weight:650;position:sticky;top:0;background:#142235}td,th{padding:11px 9px;border-bottom:1px solid #26374a;vertical-align:top}td{overflow-wrap:anywhere}.ok{color:#65dec2}.bad{color:#ff9b83}
 .measure-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}.measure-grid h3{margin:12px 0;font-size:15px}.measure-grid pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1727;border:1px solid #294059;border-radius:10px;padding:12px;max-height:170px;overflow:auto;font-size:12px}.previews{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}.previews img{width:100%;height:auto;aspect-ratio:4/3;object-fit:contain;background:#0b1727;border:1px solid #294059;border-radius:9px}.previews figure{margin:0}.previews figcaption{font-size:12px;color:#a6b8cb;margin-top:7px}.measure-note{color:#9badbf;font-size:12px;line-height:1.5}
-.tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}.tabs button,.action-button{font:inherit;cursor:pointer;border:1px solid #386079;border-radius:10px;color:#b9d5e6;background:#1b3248;padding:10px 14px}.tabs button[aria-selected="true"]{background:#24645e;border-color:#49c9ad;color:#fff}.tab-view[hidden],.tabs button[hidden]{display:none}.tab-view{margin-top:14px}.tab-view>.panel{margin-top:14px}.action-buttons{display:flex;flex-wrap:wrap;gap:12px}.action-button{background:#215b55;border-color:#48b9a7}.action-button:disabled{opacity:.5;cursor:wait}.action-status{margin-top:18px;padding:16px;background:#0c1b2d;border-radius:10px;min-height:70px}.tab-view audio{width:100%;margin:12px 0 18px}
+.app-shell{display:grid;grid-template-columns:230px minmax(0,1fr);gap:26px;align-items:start}.tabs{display:flex;flex-direction:column;gap:6px;position:sticky;top:20px;max-height:calc(100vh - 40px);overflow:auto;padding:14px;border:1px solid #25374b;border-radius:16px;background:#101e30}.nav-label{padding:12px 10px 5px;color:#65dec2;font-size:11px;text-transform:uppercase;letter-spacing:.12em}.tabs button,.action-button{font:inherit;cursor:pointer;border:1px solid #386079;border-radius:10px;color:#b9d5e6;background:#1b3248;padding:10px 14px}.tabs button{text-align:left;width:100%;border-color:transparent;background:transparent}.tabs button[aria-selected="true"]{background:#24645e;border-color:#49c9ad;color:#fff}.tab-view[hidden],.tabs button[hidden]{display:none}.tab-view>.panel{margin-top:14px}.action-buttons{display:flex;flex-wrap:wrap;gap:12px}.action-button{background:#215b55;border-color:#48b9a7}.action-button:disabled{opacity:.5;cursor:wait}.action-status{margin-top:18px;padding:16px;background:#0c1b2d;border-radius:10px;min-height:70px}.tab-view audio{width:100%;margin:12px 0 18px}
 .tab-view pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1727;border:1px solid #294059;border-radius:10px;padding:12px;max-height:500px;overflow:auto;font-size:12px}
+.chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin:18px 0}.chart{border:1px solid #294059;border-radius:12px;background:#0d1b2b;padding:15px;min-width:0}.chart h3{font-size:14px;margin:0 0 12px}.chart svg{display:block;width:100%;height:auto;overflow:visible}.chart small{color:#9badbf}.legend{display:flex;gap:14px;flex-wrap:wrap;color:#b9cddd;font-size:12px;margin-top:9px}.legend span:before{content:'●';color:var(--swatch);margin-right:5px}.process-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.process{background:#10263a;border:1px solid #294059;padding:15px;border-radius:12px}.process strong{display:block;margin-bottom:8px;color:#65dec2}.table-wrap{overflow:auto}.table-wrap table{min-width:650px}.insight{border-left:3px solid #49c9ad;padding:12px 15px;background:#102b38;margin:15px 0;color:#c2dae5}.signature-value{word-break:break-all;font-family:ui-monospace,monospace;line-height:1.6}.status-good{color:#65dec2}.status-warn{color:#ffba83}
 .report-list{display:flex;flex-wrap:wrap;gap:9px;margin:0 0 18px}.report-list button{font:inherit;cursor:pointer;border:1px solid #386079;background:#183149;color:#c4dbe9;border-radius:9px;padding:8px 11px}.report-list button[aria-selected="true"]{border-color:#49c9ad;background:#24645e;color:#fff}
 .sequence-steps{padding-left:22px;color:#bad0dc;font-size:13px}.sequence-steps li{padding:5px 0}.sequence-steps li[data-status="completed"]{color:#65dec2}.sequence-steps li[data-status="failed"]{color:#ff9b83}
-@media(max-width:850px){.cards{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.wide{grid-column:auto}}@media(max-width:520px){.cards{grid-template-columns:1fr 1fr}.card{padding:14px}.value{font-size:27px}main{padding:20px 14px}.pill{display:none}}
+@media(max-width:850px){.app-shell{grid-template-columns:1fr}.tabs{position:static;max-height:none;display:flex;flex-direction:row;overflow-x:auto;white-space:nowrap;padding:8px}.tabs button{width:auto;flex:none}.tabs .nav-label{display:none}.cards{grid-template-columns:repeat(2,1fr)}.grid,.chart-grid,.process-grid{grid-template-columns:1fr}.wide{grid-column:auto}}@media(max-width:520px){.cards{grid-template-columns:1fr 1fr}.card{padding:14px}.value{font-size:27px}main{padding:20px 14px}.pill{display:none}}
 </style></head><body><main>
 <header><div><div class="eyebrow">IS Lab · Synthetic Environment</div><h1 id="title">Dashboard</h1><div class="muted" id="updated">Loading local evidence…</div></div><span class="pill" id="mode-pill">LAB VM</span></header>
-<nav class="tabs" aria-label="Dashboard sections" id="tabs">
-<button data-tab="overview" aria-selected="true">Overview</button><button data-tab="controls" hidden>Lab controls</button>
-<button data-tab="text">Text</button><button data-tab="image">Image</button><button data-tab="audio">Audio</button>
-<button data-tab="defense">Defense</button><button data-tab="performance">Performance</button>
-<button data-tab="evidence">Hash &amp; signature</button><button data-tab="reports">Reports</button><button data-tab="events">Events</button></nav>
+<div class="app-shell"><nav class="tabs" aria-label="Dashboard sections" id="tabs">
+<span class="nav-label">Mission</span><button data-tab="overview" aria-selected="true">Overview</button><button data-tab="controls" hidden>Lab controls</button><button data-tab="honeypot">Honeypot demo</button><button data-tab="defense">Defense</button>
+<span class="nav-label">Security analysis</span><button data-tab="text">Plaintext &amp; ciphertext</button><button data-tab="avalanche">Avalanche / diffusion</button><button data-tab="confusion">Confusion</button><button data-tab="image">Image</button><button data-tab="audio">Audio</button><button data-tab="hash">Hashing</button><button data-tab="signature">Signature</button>
+<span class="nav-label">Evidence</span><button data-tab="performance">Performance</button><button data-tab="reports">Reports</button><button data-tab="events">Events</button></nav><div class="workspace">
 <div class="tab-view" id="tab-overview"><section class="cards" id="cards"></section><div class="grid"><section class="panel"><h2>Activity summary</h2><div id="summary"></div></section>
 <section class="panel"><h2 id="chart-title">Latest trial</h2><div class="bars" id="visual"></div></section>
 </div></div>
 <div class="tab-view" id="tab-controls" hidden><section class="panel"><h2>Controlled synthetic actions</h2>
 <p class="muted">Ubuntu must run the armed lab agent. Actions use signed C2; encryption writes disposable copies and transfer sends only the fixed synthetic report.</p>
-<div class="action-buttons"><button class="action-button" data-action="FULL_LAB_SEQUENCE">Run full lab sequence</button></div>
-<p class="muted">Capture → contained trial → verified PDF transfer → dataset check → stop capture → forensic report.</p>
-<ol id="sequence-steps" class="sequence-steps"></ol>
 <div class="action-buttons"><button class="action-button" data-action="PING">Ping victim</button>
 <button class="action-button" data-action="START_ENCRYPT">Run contained trial</button>
 <button class="action-button" data-action="START_EXFIL">Transfer synthetic PDF</button>
@@ -541,15 +656,19 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 <button class="action-button" data-capture="stop">Stop PCAP capture</button></div>
 <div class="action-status" id="capture-status" role="status">No dashboard capture started.</div>
 <div class="action-status" id="action-status" role="status">No action run yet.</div></section></div>
-<div class="tab-view" id="tab-text" hidden><section class="panel"><h2>Text encryption</h2><div id="security-text"></div></section></div>
+<div class="tab-view" id="tab-honeypot" hidden><section class="panel"><h2>Honeypot monitoring demo</h2><p class="muted">The simulator writes encrypted copies into a disposable trial. Its first decoy event triggers containment of its registered PID. The original dataset is verified after the run.</p><div id="security-honeypot"></div><div id="demo-control" hidden><p class="insight">Run the full guided sequence: capture, verified backup, contained trial, encrypted transfer, dataset check, isolated restore, PCAP analysis, report, and signature verification. Keep the victim dashboard and armed C2 agent running.</p><button class="action-button" data-action="FULL_LAB_SEQUENCE">Run entire synthetic demo</button><div class="action-status" id="demo-status" role="status">No demo run yet.</div><ol id="sequence-steps" class="sequence-steps"></ol></div><h3>Recent decoy and containment events</h3><div id="honeypot-events"></div></section></div>
+<div class="tab-view" id="tab-text" hidden><section class="panel"><h2>Plaintext and ciphertext</h2><div id="security-text"></div></section></div>
+<div class="tab-view" id="tab-avalanche" hidden><section class="panel"><h2>Avalanche effect / diffusion</h2><div id="security-avalanche"></div></section></div>
+<div class="tab-view" id="tab-confusion" hidden><section class="panel"><h2>Confusion</h2><div id="security-confusion"></div></section></div>
 <div class="tab-view" id="tab-image" hidden><section class="panel"><h2>RGB image analysis</h2><div id="security-image"></div></section></div>
 <div class="tab-view" id="tab-audio" hidden><section class="panel"><h2>Audio encryption</h2><div id="security-audio"></div></section></div>
 <div class="tab-view" id="tab-defense" hidden><section class="panel"><h2>Containment evaluation</h2><div id="security-defense"></div></section></div>
-<div class="tab-view" id="tab-performance" hidden><section class="panel"><h2>Processing efficiency</h2><div id="security-performance"></div></section></div>
-<div class="tab-view" id="tab-evidence" hidden><section class="panel"><h2>Hash and signature evidence</h2><div class="measure-grid" id="security-evidence"></div></section></div>
+<div class="tab-view" id="tab-performance" hidden><section class="panel"><h2>Performance analysis</h2><div id="security-performance"></div></section></div>
+<div class="tab-view" id="tab-hash" hidden><section class="panel"><h2>SHA-256 security and performance</h2><div id="security-hash"></div></section></div>
+<div class="tab-view" id="tab-signature" hidden><section class="panel"><h2>Digital signature generation and verification</h2><div id="security-signature"></div></section></div>
 <div class="tab-view" id="tab-reports" hidden><section class="panel"><h2>Generated reports</h2><div id="reports"></div></section></div>
 <div class="tab-view" id="tab-events" hidden><section class="panel"><h2>Recorded events</h2><div class="scroll"><table><thead><tr><th>Time (UTC)</th><th>Module</th><th>Event</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table></div></section></div>
-</main><script>
+</div></div></main><script>
 const ACTION_TOKEN='__ACTION_TOKEN__';
 const $=id=>document.getElementById(id);
 let activeTab='overview',role='victim';
@@ -570,6 +689,44 @@ function measurement(container,label,value,max,unit){
 }
 function metricRow(container,label,value){const row=el('div','row');row.append(el('span','',label),el('span','',value));container.append(row)}
 function section(parent,title){const box=el('div','');box.append(el('h3','',title));parent.append(box);return box}
+const SVG_NS='http://www.w3.org/2000/svg';
+function svgEl(tag,attrs={}){const node=document.createElementNS(SVG_NS,tag);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,String(value));return node}
+function chart(parent,title,series,{kind='bar',unit='',note='',labels=null}={}){
+  const valid=series.filter(s=>Array.isArray(s.values)&&s.values.some(v=>Number.isFinite(Number(v))));
+  if(!valid.length)return;
+  const box=el('div','chart');box.append(el('h3','',title));const width=500,height=215,padL=42,padB=39,padT=12,padR=12;
+  const values=valid.flatMap(s=>s.values.filter(v=>Number.isFinite(Number(v))).map(Number));
+  const top=Math.max(1,...values)*1.1,n=Math.max(...valid.map(s=>s.values.length));
+  const svg=svgEl('svg',{viewBox:`0 0 ${width} ${height}`,role:'img','aria-label':title});
+  for(let tick=0;tick<=4;tick++){
+    const y=height-padB-(height-padB-padT)*tick/4;
+    svg.append(svgEl('line',{x1:padL,y1:y,x2:width-padR,y2:y,stroke:'#2c4054'}));
+    const t=svgEl('text',{x:padL-5,y:y+4,'text-anchor':'end',fill:'#a6b8cb','font-size':10});t.textContent=(top*tick/4).toFixed(top<10?2:0);svg.append(t);
+  }
+  const plotW=width-padL-padR,plotH=height-padB-padT;
+  if(kind==='line'){
+    valid.forEach((s,index)=>{
+      const points=s.values.map((v,i)=>`${padL+(n===1?plotW/2:i*plotW/(n-1))},${height-padB-Number(v)/top*plotH}`).join(' ');
+      svg.append(svgEl('polyline',{points,fill:'none',stroke:s.color||['#49c9ad','#ffad83','#81aafb'][index%3],'stroke-width':2.5,'stroke-linejoin':'round'}));
+      if(s.values.length<=25)s.values.forEach((v,i)=>svg.append(svgEl('circle',{cx:padL+(n===1?plotW/2:i*plotW/(n-1)),cy:height-padB-Number(v)/top*plotH,r:2.5,fill:s.color||['#49c9ad','#ffad83','#81aafb'][index%3]})));
+    });
+  }else{
+    const band=plotW/n,barW=Math.max(2,Math.min(24,band/(valid.length+0.4)));
+    valid.forEach((s,index)=>s.values.forEach((v,i)=>{
+      const h=Math.max(0,Number(v)/top*plotH),x=padL+i*band+(band-barW*valid.length)/2+index*barW;
+      const rect=svgEl('rect',{x,y:height-padB-h,width:barW-1,height:h,rx:2,fill:s.color||['#49c9ad','#ffad83','#81aafb'][index%3]});
+      const tip=svgEl('title');tip.textContent=`${labels?.[i]||i+1} · ${s.name}: ${v} ${unit}`;rect.append(tip);svg.append(rect);
+    }));
+  }
+  const indexes=n<=12?Array.from({length:n},(_,i)=>i):[0,Math.floor((n-1)/2),n-1];
+  indexes.forEach(i=>{const t=svgEl('text',{x:padL+(kind==='bar'?(i+.5)*plotW/n:(n===1?plotW/2:i*plotW/(n-1))),y:height-12,'text-anchor':'middle',fill:'#a6b8cb','font-size':10});t.textContent=String(labels?.[i]??i+1).slice(0,15);svg.append(t)});
+  box.append(svg);const legend=el('div','legend');valid.forEach((s,i)=>{const label=el('span','',s.name);label.style.setProperty('--swatch',s.color||['#49c9ad','#ffad83','#81aafb'][i%3]);legend.append(label)});box.append(legend);
+  if(note)box.append(el('small','',note));parent.append(box);
+}
+function chartGrid(parent){const grid=el('div','chart-grid');parent.append(grid);return grid}
+function process(parent,title,detail){const box=el('div','process');box.append(el('strong','',title),el('div','muted',detail));parent.append(box)}
+function table(parent,headers,rows){const wrap=el('div','table-wrap'),t=el('table',''),thead=el('thead',''),head=el('tr','');headers.forEach(h=>head.append(el('th','',h)));thead.append(head);const body=el('tbody','');rows.forEach(row=>{const tr=el('tr','');row.forEach(value=>tr.append(el('td','',value??'—')));body.append(tr)});t.append(thead,body);wrap.append(t);parent.append(wrap)}
+const number=(value,digits=3)=>value!==null&&value!==undefined&&value!==''&&Number.isFinite(Number(value))?Number(value).toFixed(digits):'Not recorded';
 function renderReports(items){
   const root=$('reports');root.replaceChildren();
   if(!items.length){root.append(el('p','muted','No generated report is available on this VM.'));return}
@@ -586,100 +743,160 @@ function renderReports(items){
 }
 let lastSecurity='';
 function drawSecurity(data){
-  const sec=data.security||{},text=sec.text||{},hash=sec.hash||{},im=sec.image||{},audio=sec.audio||{},ev=sec.evaluation||{},sig=sec.signature||{},crypto=sec.crypto||{};
+  const sec=data.security||{},text=sec.text||{},hash=sec.hash||{},im=sec.image||{},audio=sec.audio||{},ev=sec.evaluation||{},sig=sec.signature||{},perf=sec.performance||[];
   const fingerprint=JSON.stringify(sec)+data.role;if(fingerprint===lastSecurity)return;lastSecurity=fingerprint;
-  const root={text:$('security-text'),image:$('security-image'),audio:$('security-audio'),
-              defense:$('security-defense'),performance:$('security-performance'),evidence:$('security-evidence')};
+  const root={text:$('security-text'),avalanche:$('security-avalanche'),confusion:$('security-confusion'),image:$('security-image'),audio:$('security-audio'),
+              defense:$('security-defense'),honeypot:$('security-honeypot'),performance:$('security-performance'),hash:$('security-hash'),signature:$('security-signature')};
   for(const node of Object.values(root))node.replaceChildren();
   if(text.plaintext){
-    const box=section(root.text,'Text encryption and one-bit changes');
-    for(const [label,value] of [['Plaintext',text.plaintext],['Ciphertext (Base64)',text.ciphertext_base64],['Recovered',text.recovered_plaintext]]){
-      box.append(el('div','label',label),el('pre','',value||''));
+    const box=root.text;
+    box.append(el('p','insight',`${text.algorithm||'AES'} · ${text.plaintext_bytes||'?'} plaintext bytes → ${text.ciphertext_bytes||'?'} ciphertext bytes · one synthetic sample. The IV is displayed for inspection; the ephemeral key is never stored.`));
+    for(const [label,value] of [['Plaintext',text.plaintext],['IV (Base64)',text.iv_base64],['Ciphertext (Base64)',text.ciphertext_base64],['Recovered plaintext',text.recovered_plaintext]]){
+      box.append(el('div','label',label),el('pre','',value||'Not recorded'));
     }
-    const diffusion=text.diffusion_one_plaintext_bit||{},confusion=text.confusion_one_key_bit||{};
-    measurement(box,'Diffusion, ciphertext bits',diffusion.summary&&diffusion.summary.bit_change_pct_median,100,'%');
-    measurement(box,'Diffusion, ciphertext hex digits',diffusion.summary&&diffusion.summary.hex_character_change_pct_median,100,'%');
-    measurement(box,'Confusion, ciphertext bits',confusion.summary&&confusion.summary.bit_change_pct_median,100,'%');
-    measurement(box,'Confusion, ciphertext hex digits',confusion.summary&&confusion.summary.hex_character_change_pct_median,100,'%');
-    box.append(el('p','measure-note','One plaintext bit or one key bit changes with fixed IV. Hex digits are ciphertext representation, not plaintext characters.'));
-  }
-  if(hash.digest_hex){
-    const box=section(root.evidence,'SHA-256 digest and properties');
-    box.append(el('div','label','Synthetic mission brief digest'),el('pre','',hash.digest_hex));
-    metricRow(box,'Median digest generation',hash.generation_time_ms_median+' ms');
-    measurement(box,'One input-bit digest change',hash.one_input_bit_digest_change_pct_median,100,'%');
-    const definitions=hash.definitions||{},search=hash.bounded_search||{};
-    for(const [name,label] of [['preimage_resistance','Pre-image'],['second_preimage_resistance','Second pre-image'],['collision_resistance','Collision']]){
-      metricRow(box,label,definitions[name]||'');
-    }
-    box.append(el('p','measure-note','Bounded '+search.candidates+'-candidate search: pre-image '+Boolean(search.preimage_found)+', second pre-image '+Boolean(search.second_preimage_found)+', collision '+Boolean(search.collision_found)+'. '+(hash.limit||'')));
+    try{
+      const plain=Array.from(new TextEncoder().encode(text.plaintext)),cipher=Array.from(Uint8Array.from(atob(text.ciphertext_base64),c=>c.charCodeAt(0)));
+      const lines=chartGrid(box),count=Math.min(32,plain.length,cipher.length);
+      chart(lines,'Plaintext vs ciphertext byte values (first '+count+')',[
+        {name:'UTF-8 plaintext',values:plain.slice(0,count),color:'#49c9ad'},
+        {name:'Ciphertext bytes',values:cipher.slice(0,count),color:'#ffad83'}],{kind:'line',unit:'byte value',note:'Position on x-axis; each y value is a byte from 0 to 255. The two formats have different lengths.'});
+      const bins=16,hist=values=>Array.from({length:bins},(_,i)=>values.filter(v=>Math.floor(v/16)===i).length);
+      chart(lines,'Byte frequency by 16-value range',[
+        {name:'Plaintext',values:hist(plain),color:'#49c9ad'},
+        {name:'Ciphertext',values:hist(cipher),color:'#ffad83'}],{unit:'bytes',labels:Array.from({length:bins},(_,i)=>`${i*16}–${i*16+15}`),note:'Counts depend on sample length. This is a visualization, not a randomness test.'});
+    }catch(error){box.append(el('p','muted','Byte charts unavailable: '+error.message))}
+  }else root.text.append(el('p','muted','Text evidence has not been generated on this VM.'));
+  for(const [name,source,kind] of [
+    ['avalanche',text.diffusion_one_plaintext_bit,'plaintext'],
+    ['confusion',text.confusion_one_key_bit,'key']]){
+    const box=root[name];
+    box.append(el('p','insight',kind==='plaintext'
+      ?'Diffusion experiment: hold the AES key and IV fixed, flip exactly one plaintext bit, re-encrypt, then compare each ciphertext bit with the original.'
+      :'Confusion experiment: hold the plaintext and IV fixed, flip exactly one AES key bit, re-encrypt, then compare each ciphertext bit with the original.'));
+    if(!source?.summary){box.append(el('p','muted','Ten-trial measurements unavailable.'));continue}
+    const s=source.summary,trials=source.trials||[];
+    const summary=el('div','process-grid');process(summary,'Ciphertext bits changed',number(s.bit_change_pct_median)+'% median · ideal expectation for avalanche near 50%');
+    process(summary,'Hex digits changed',number(s.hex_character_change_pct_median)+'% median · positional ciphertext hex digits, not plaintext characters');box.append(summary);
+    const grid=chartGrid(box);chart(grid,'One-bit trials: ciphertext bit changes',[
+      {name:'Measured',values:trials.map(t=>t.bit_change_pct),color:'#49c9ad'},
+      {name:'50% reference',values:trials.map(()=>50),color:'#ffad83'}],{kind:'line',unit:'%',note:'Each point is one bit flip with the other inputs held fixed.'});
+    chart(grid,'One-bit trials: hex digit changes',[
+      {name:'Measured',values:trials.map(t=>t.hex_character_change_pct)}],{kind:'bar',unit:'%',note:'Hex representation; 100% is an illustrative target, not a guarantee.'});
+    table(box,['Trial','Changed ciphertext bits (%)','Changed ciphertext hex digits (%)'],trials.map((t,i)=>[i+1,number(t.bit_change_pct),number(t.hex_character_change_pct)]));
+    box.append(el('p','measure-note',text.metric_definition||'Each controlled trial changes one input bit. Sample values do not prove a general cryptographic guarantee.'));
   }
   if(im.metrics){
-    const box=section(root.image,'RGB image measurements'),m=im.metrics;
-    measurement(box,'Original entropy',m.entropy_original_bits_per_byte,8,'bits/byte');
-    measurement(box,'Encrypted entropy',m.entropy_encrypted_bits_per_byte,8,'bits/byte');
-    measurement(box,'NPCR, changed pixels',m.npcr_ciphertexts_one_plaintext_bit_pct,100,'%');
-    measurement(box,'UACI, mean channel difference',m.uaci_ciphertexts_one_plaintext_bit_pct,100,'%');
-    for(const [label,key,unit] of [
-      ['Original neighbor correlation','horizontal_red_correlation_original',''],
-      ['Encrypted neighbor correlation','horizontal_red_correlation_encrypted',''],
-      ['Original to encrypted MSE','mse_original_to_encrypted',''],['Original to encrypted PSNR','psnr_original_to_encrypted_db','dB'],
-      ['Original to recovered MSE','mse_original_to_recovered',''],['Original to recovered PSNR','psnr_original_to_recovered_db','dB']
-    ])metricRow(box,label,typeof m[key]==='number'?m[key].toFixed(4)+' '+unit:String(m[key]));
-    box.append(el('p','measure-note','Ciphertext bytes are mapped to RGB pixels for display. NPCR and UACI compare two ciphertext views after one plaintext-bit change.'));
-  }
+    const box=root.image,m=im.metrics,grid=chartGrid(box);
+    chart(grid,'RGB pixel encryption metrics',[
+      {name:'Measured %',values:[m.npcr_ciphertexts_one_plaintext_bit_pct,m.uaci_ciphertexts_one_plaintext_bit_pct]}],
+      {unit:'%',labels:['NPCR','UACI'],note:'Compare two ciphertext pixel views after one plaintext-bit change.'});
+    chart(grid,'Entropy, original and encrypted bytes',[
+      {name:'Bits/byte',values:[m.entropy_original_bits_per_byte,m.entropy_encrypted_bits_per_byte]}],
+      {unit:'bits/byte',labels:['Original','Encrypted'],note:'The maximum for a byte is 8 bits.'});
+    table(box,['RGB metric','Observation'],[
+      ['Original neighbor correlation',number(m.horizontal_red_correlation_original,4)],['Encrypted neighbor correlation',number(m.horizontal_red_correlation_encrypted,4)],
+      ['Original → encrypted MSE',number(m.mse_original_to_encrypted)],['Original → encrypted PSNR',String(m.psnr_original_to_encrypted_db)+' dB'],
+      ['Original → recovered MSE',number(m.mse_original_to_recovered)],['Original → recovered PSNR',String(m.psnr_original_to_recovered_db)+' dB']]);
+    box.append(el('p','measure-note','Ciphertext bytes are mapped to RGB pixels for display. This pixel view is not a decodable JPEG.'));
+    if(data.role==='victim'&&im.previews_available){
+      const gallery=el('div','previews');for(const [name,label] of [['original','Original RGB'],['encrypted','Ciphertext pixels'],['recovered','Recovered RGB']]){
+        const figure=el('figure',''),picture=el('img','');picture.src='/api/security-image/'+name;picture.alt=label;
+        figure.append(picture,el('figcaption','',label));gallery.append(figure);
+      }box.append(gallery);
+    }
+  }else root.image.append(el('p','muted','Image measurements unavailable.'));
   if(audio.sha256){
-    const box=section(root.audio,'Synthetic audio encryption');
-    metricRow(box,'MP3 bytes',audio.source_bytes);metricRow(box,'Recovered SHA-256',audio.sha256);
+    const box=root.audio;box.append(el('p','insight','Conventional AES encryption of synthetic MP3 bytes; the encrypted bytes cannot be played as audio. The recovered sample is checked against the committed SHA-256 baseline.'));
+    metricRow(box,'Original MP3 bytes',audio.source_bytes);metricRow(box,'Recovered SHA-256',audio.sha256);
+    metricRow(box,'Recovered matches baseline',audio.recovered_matches_baseline?'Yes':'Not confirmed');
     box.append(el('div','label','Ciphertext prefix (Base64)'),el('pre','',audio.ciphertext_prefix_base64||''));
-    box.append(el('p','measure-note','Conventional AES encryption of MP3 bytes; recovered audio matches the baseline. Ciphertext is not playable.'));
-    if(data.role==='victim'&&audio.playback_available){
-      for(const [name,label] of [['original','Original synthetic MP3'],['recovered','Recovered synthetic MP3']]){
-        box.append(el('div','label',label));const player=el('audio','');player.controls=true;player.preload='none';player.src='/api/security-audio/'+name;box.append(player);
-      }
+    if(data.role==='victim'&&audio.playback_available)for(const [name,label] of [['original','Original synthetic MP3'],['recovered','Recovered synthetic MP3']]){
+      box.append(el('div','label',label));const player=el('audio','');player.controls=true;player.preload='none';player.src='/api/security-audio/'+name;box.append(player);
+    }
+  }else root.audio.append(el('p','muted','Audio evidence unavailable.'));
+  const runs=ev.runs||[],withRuns=runs.filter(r=>r.mode==='with'),withoutRuns=runs.filter(r=>r.mode==='without');
+  if(ev.summary){
+    const s=ev.summary,box=root.defense;box.append(el('p','insight',`${ev.pairs} matched pairs (${runs.length} controlled runs). The simulator writes copies under results/simtrial-*; original data is not changed.`));
+    const grid=chartGrid(box);
+    chart(grid,'Real encrypted copies per paired trial',[
+      {name:'Monitored',values:withRuns.map(r=>r.real_copies),color:'#49c9ad'},
+      {name:'Without watcher',values:withoutRuns.map(r=>r.real_copies),color:'#ffad83'}],
+      {unit:'copies',labels:withRuns.map(r=>'Pair '+r.pair),note:'Measured trial copies, not damage to original files.'});
+    chart(grid,'Alert to stop and kill response by trial',[
+      {name:'Alert → stop',values:withRuns.map(r=>r.alert_to_stop_ms),color:'#49c9ad'},
+      {name:'Kill response',values:withRuns.map(r=>r.kill_response_ms),color:'#81aafb'}],
+      {kind:'line',unit:'ms',note:'Timestamps and process response from monitored trial logs.'});
+    table(box,['Condition','Runs','Median real trial copies','Median alert → stop (ms)','Median kill response (ms)'],[
+      ['Monitored',withRuns.length,s.with_real_copies_median,number(s.alert_to_stop_ms_median),number(s.kill_response_ms_median)],
+      ['No trial watcher',withoutRuns.length,s.without_real_copies_median,'—','—']]);
+    const details=el('details','');details.append(el('summary','','All intermediate trial records'));
+    table(details,['Pair','Mode','Trial','Decoy copies','Real copies','Alert → stop (ms)','Kill response (ms)','Original intact'],runs.map(r=>[r.pair,r.mode,r.trial,r.decoy_copies,r.real_copies,r.alert_to_stop_ms??'—',r.kill_response_ms??'—',r.original_intact?'Yes':'No']));box.append(details);
+  }else root.defense.append(el('p','muted','Paired defense evaluation unavailable.'));
+  const hp=root.honeypot;hp.append(el('p','insight','1. Synthetic lock copy → 2. Decoy file event → 3. Registered simulator PID stopped → 4. Verify original baseline → 5. Recover and report. The standalone watcher records file events and cannot infer a PID from an event alone.'));
+  if(ev.summary){metricRow(hp,'Trial pairs',ev.pairs);metricRow(hp,'Median alert-to-stop',number(ev.summary.alert_to_stop_ms_median)+' ms');metricRow(hp,'Median real copies with monitoring',ev.summary.with_real_copies_median);metricRow(hp,'Median real copies without monitoring',ev.summary.without_real_copies_median)}
+  hp.append(el('p','measure-note','The button below runs fixed, signed actions only. It requires the Ubuntu victim dashboard and armed C2 agent. Historical evaluation results remain available under Defense.'));
+  if(hash.digest_hex){
+    const box=root.hash;box.append(el('div','label','SHA-256 digest of synthetic mission brief'),el('pre','signature-value',hash.digest_hex));
+    metricRow(box,'Input length',hash.source_bytes+' bytes');metricRow(box,'Median generation time',number(hash.generation_time_ms_median,6)+' ms across '+hash.generation_trials+' trials');
+    metricRow(box,'One-bit input change: median digest bits changed',number(hash.one_input_bit_digest_change_pct_median)+'%');
+    const grid=chartGrid(box);chart(grid,'Digest generation time',[{name:'Median',values:[hash.generation_time_ms_median]}],{unit:'ms',labels:['SHA-256'],note:'The timing chart has one median from repeated trials, not a time series.'});
+    chart(grid,'Digest avalanche by input bit',[
+      {name:'Measured',values:hash.digest_changed_bits_each_trial||[]},
+      {name:'128-bit reference',values:(hash.digest_changed_bits_each_trial||[]).map(()=>128),color:'#ffad83'}],
+      {kind:'line',unit:'changed bits',note:'256-bit SHA-256 digest; each input experiment flips one bit.'});
+    const defs=hash.definitions||{},search=hash.bounded_search||{};
+    table(box,['Property','Meaning','Bounded search'],[
+      ['Pre-image',defs.preimage_resistance,search.preimage_found?'Match found':'No match'],
+      ['Second pre-image',defs.second_preimage_resistance,search.second_preimage_found?'Match found':'No match'],
+      ['Collision',defs.collision_resistance,search.collision_found?'Match found':'No match']]);
+    box.append(el('p','measure-note',`${search.candidates||0} candidates tested. ${hash.limit||'A bounded search cannot prove resistance.'}`));
+  }else root.hash.append(el('p','muted','Hash security evidence unavailable.'));
+  if(sig.sha256){
+    const box=root.signature;box.append(el('p','insight',`${sig.algorithm||'RSA-PSS-SHA256'} signs the evaluation artifact on Kali. The public key verifies it on either VM; a one-byte change was ${sig.tampered_byte_rejected?'rejected':'not confirmed as rejected'}.`));
+    for(const [label,value] of [['Signed artifact',sig.source],['Artifact SHA-256',sig.sha256],['Public key fingerprint (SHA-256)',sig.public_key_sha256],['Stored signature (Base64)',sig.signature_base64]]){
+      box.append(el('div','label',label),el('pre','signature-value',value||'Not recorded'));
+    }
+    const timing=sig.timings_ms_median||{},grid=chartGrid(box);
+    chart(grid,'Signature operations: median time',[
+      {name:'Milliseconds',values:[timing.sha256,timing.sign,timing.verify]}],
+      {unit:'ms',labels:['Hash','Sign','Verify'],note:`${sig.trials||'?'} trials · signed artifact ${sig.source_bytes||'?'} bytes`});
+    table(box,['Step','Result'],[['Generate SHA-256',number(timing.sha256,6)+' ms'],['RSA-PSS sign',number(timing.sign,6)+' ms'],['Verify signature',number(timing.verify,6)+' ms'],['One-byte tamper test',sig.tampered_byte_rejected?'Rejected':'Not confirmed']]);
+    box.append(el('p','measure-note','A displayed signature record is evidence of an earlier run. Use the attacker control to independently verify the artifact again.'));
+  }else root.signature.append(el('p','muted','Signed evaluation record unavailable.'));
+  const performance=root.performance;
+  performance.append(el('p','insight','Charts show actual recorded medians in their own units and groups. AES sample timings, paired-trial timings, and dashboard wall times have different scopes; compare like with like.'));
+  const groups=[...new Set(perf.map(r=>r.group))],charts=chartGrid(performance);
+  for(const group of groups){const rows=perf.filter(r=>r.group===group);
+    const byUnit=[...new Set(rows.map(r=>r.unit))];for(const unit of byUnit){const unitRows=rows.filter(r=>r.unit===unit);
+      chart(charts,group+' · '+unit,[{name:'Observed median',values:unitRows.map(r=>r.value)}],{
+        unit,labels:unitRows.map(r=>r.label),note:unitRows.map(r=>r.source).filter((v,i,a)=>a.indexOf(v)===i).join(' / ')+' · hover bars for exact values.'});
     }
   }
-  if(ev.summary){
-    const box=section(root.defense,'Containment comparison'),s=ev.summary;
-    box.append(el('p','muted',ev.pairs+' trial pairs · copy-only simulator'));
-    measurement(box,'Real copies with monitoring',s.with_real_copies_median,5,'median');
-    measurement(box,'Real copies without monitoring',s.without_real_copies_median,5,'median');
-    box.append(el('p','measure-note','Median alert-to-stop: '+Number(s.alert_to_stop_ms_median).toFixed(3)+' ms. Original dataset remains unchanged.'));
-  }
-  const perf=[];
-  if(text.timings_ms_median)perf.push(['Text encrypt',text.timings_ms_median.encrypt],['Text decrypt',text.timings_ms_median.decrypt]);
-  if(im.timings_ms_median)perf.push(['RGB encrypt',im.timings_ms_median.encrypt],['RGB decrypt',im.timings_ms_median.decrypt]);
-  if(audio.timings_ms_median)perf.push(['Audio encrypt',audio.timings_ms_median.encrypt],['Audio decrypt',audio.timings_ms_median.decrypt]);
-  else if(crypto.audio)perf.push(['Audio encrypt',crypto.audio.aes_encrypt_median_ms],['Audio decrypt',crypto.audio.aes_decrypt_median_ms]);
-  if(crypto.video)perf.push(['Video encrypt',crypto.video.aes_encrypt_median_ms],['Video decrypt',crypto.video.aes_decrypt_median_ms]);
-  if(perf.length){
-    const box=section(root.performance,'AES processing time'),numbers=perf.map(x=>x[1]).filter(x=>typeof x==='number');
-    const max=Math.max(...numbers,.001);for(const [label,value] of perf)measurement(box,label,value,max,'ms');
-    box.append(el('p','measure-note','Median time per sample. File sizes differ; use throughput for size-normalized comparison.'));
-  }
-  if(sig.sha256){
-    const box=section(root.evidence,'Stored digital signature');
-    box.append(el('div','label','SHA-256 digest'),el('pre','',sig.sha256),el('div','label','RSA-PSS signature (Base64)'),el('pre','',sig.signature_base64||''));
-    const timing=sig.timings_ms_median||{};
-    box.append(el('p','measure-note','Median hash '+timing.sha256+' ms · sign '+timing.sign+' ms · verify '+timing.verify+' ms · tamper rejected: '+Boolean(sig.tampered_byte_rejected)+'. Displayed record; independently verify using tests.signature_demo.'));
-  }
-  if(data.role==='victim'&&im.previews_available){
-    const box=section(root.image,'RGB pixel previews'),gallery=el('div','previews');
-    for(const [name,label] of [['original','Original RGB'],['encrypted','Ciphertext pixels'],['recovered','Recovered RGB']]){
-      const figure=el('figure',''),picture=el('img','');picture.src='/api/security-image/'+name;picture.alt=label;
-      figure.append(picture,el('figcaption','',label));gallery.append(figure);
-    }box.append(gallery);
-  }
+  table(performance,['Process','Median','Unit','Source / scope','Samples'],perf.map(r=>[r.label,number(r.value,6),r.unit,r.source,r.samples??'—']));
+  const expected=['Text encrypt','Text decrypt','RGB pixels encrypt','RGB pixels decrypt','MP3 encrypt','MP3 decrypt',
+    'Document encrypt','Document decrypt','Image encrypt','Image decrypt','Audio encrypt','Audio decrypt',
+    'Video encrypt','Video decrypt','SHA-256 digest','RSA-PSS sign','RSA-PSS verify',
+    'Copy-only lock trial','Per-file AES lock','Per-file RSA key wrap','Per-file locked copy write',
+    'Honeypot alert to stop','Containment kill response','Encrypted file transfer',
+    'TLS backup round trip','Isolated restore round trip','PCAP parse','Report generation','Artifact verification'];
+  const missing=expected.filter(name=>!perf.some(row=>row.label===name));
+  if(missing.length){const box=el('div','');box.append(el('h3','','Stages awaiting recorded measurements'));
+    missing.forEach(name=>metricRow(box,name,'Not recorded on this VM'));performance.append(box)}
+  performance.append(el('p','measure-note','Standalone honeypot event-handler CPU time and the full monitored simulator duration are not instrumented. The available alert-to-stop interval measures the observed defense response.'));
+  if(!perf.length)performance.append(el('p','muted','Generate benchmark and evaluation evidence to populate performance charts.'));
 }
 function draw(data){role=data.role;$('title').textContent=data.title;$('updated').textContent='Updated '+data.updated.replace('T',' ')+' UTC · refreshes every 4 seconds';
 $('mode-pill').textContent=role==='attacker'?'CONTROLLED LAB ACTIONS':'READ ONLY · LAB VM';
-document.querySelector('[data-tab="controls"]').hidden=role!=='attacker';showTab(activeTab);
+document.querySelector('[data-tab="controls"]').hidden=role!=='attacker';$('demo-control').hidden=role!=='attacker';showTab(activeTab);
 const cards=$('cards');cards.replaceChildren();for(const c of data.cards){const box=el('div','card');box.append(el('div','label',c.label),el('div','value',c.value),el('div','note',c.note));cards.append(box)}
 const summary=$('summary');summary.replaceChildren();for(const row of data.summary){const item=el('div','row');item.append(el('span','',row.label),el('span','',row.value));summary.append(item)}
 const visual=$('visual');visual.replaceChildren();
 if(data.role==='victim'){$('chart-title').textContent='Latest encryption trial';const t=data.trial;if(!t){visual.append(el('p','muted','No local simulator trial found.'))}else{for(const [label,n,cls] of [['Decoy copies',t.decoy,''],['Real copies',t.real,'real']]){const wrap=el('div','');const head=el('div','barhead');head.append(el('span','',label),el('strong','',n));const track=el('div','track');const fill=el('div','fill '+cls);fill.style.width=Math.min(100,n/10*100)+'%';track.append(fill);wrap.append(head,track);visual.append(wrap)}visual.append(el('p','muted',t.name+(t.complete?' · completed':' · interrupted or in progress')))}}
 else{$('chart-title').textContent='Local recovered files';if(!data.files.length)visual.append(el('p','muted','No received files yet.'));for(const f of data.files){const row=el('div','row');row.append(el('span','',f.name),el('span',f.valid?'ok':'bad',(f.valid?'SHA-256 verified':'Unverified')+' · '+f.bytes.toLocaleString()+' bytes'));visual.append(row)}}
 const table=$('events');table.replaceChildren();for(const event of data.events){const tr=el('tr','');for(const field of ['ts','module','event','detail'])tr.append(el('td','',event[field]));table.append(tr)}if(!data.events.length){const tr=el('tr','');const td=el('td','muted','No recorded events yet.');td.colSpan=4;tr.append(td);table.append(tr)}
+const hpEvents=(data.events||[]).filter(e=>/honeypot|containment|simulator/.test(e.module)).slice(0,12),hp=$('honeypot-events');hp.replaceChildren();
+if(hpEvents.length)tableView(hpEvents);else hp.append(el('p','muted','No recent monitored trial events in the bounded event feed.'));
+function tableView(rows){table(hp,['Time (UTC)','Module','Event','Detail'],rows.map(e=>[e.ts,e.module,e.event,e.detail]))}
 renderReports(data.reports||[]);
 drawSecurity(data)}
 async function refresh(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);draw(await response.json())}catch(error){$('updated').textContent='Dashboard data unavailable: '+error.message}}
@@ -687,15 +904,17 @@ async function refreshAction(){
   if(role!=='attacker')return;
   try{
     const response=await fetch('/api/action/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);
-    const state=await response.json();$('action-status').textContent=(state.command||'Lab controls')+' · '+state.status+' · '+state.detail;
+    const state=await response.json();const summary=(state.command||'Lab controls')+' · '+state.status+' · '+state.detail;
+    $('action-status').textContent=summary;$('demo-status').textContent=summary;
     fullSequenceRunning=state.command==='FULL_LAB_SEQUENCE'&&state.status==='running';
     const progress=$('sequence-steps');progress.replaceChildren();
-    for(const step of state.steps||[]){const item=el('li','',step.name+' · '+step.status+' · '+step.detail);item.dataset.status=step.status;progress.append(item)}
+    for(const step of state.steps||[]){const item=el('li','',step.name+' · '+step.status+' · '+step.detail+
+      (typeof step.duration_ms==='number'?' · '+step.duration_ms.toFixed(3)+' ms':''));item.dataset.status=step.status;progress.append(item)}
     for(const button of document.querySelectorAll('[data-action]'))button.disabled=state.status==='running'||(button.dataset.action==='ANALYZE_PCAP'&&captureRunning);
     if(['ANALYZE_PCAP','FULL_LAB_SEQUENCE'].includes(state.command)&&state.status==='completed'&&state.finished!==lastReportAction){
       lastReportAction=state.finished;selectedReport=null;await refresh();
     }
-  }catch(error){$('action-status').textContent='Action status unavailable: '+error.message}
+  }catch(error){$('action-status').textContent='Action status unavailable: '+error.message;$('demo-status').textContent=$('action-status').textContent}
 }
 let lastReportAction=null;
 let captureRunning=false;
@@ -723,14 +942,14 @@ for(const button of document.querySelectorAll('[data-capture]'))button.addEventL
   }catch(error){$('capture-status').textContent='Capture action failed: '+error.message;await refreshCapture()}
 });
 for(const button of document.querySelectorAll('[data-action]'))button.addEventListener('click',async()=>{
-  button.disabled=true;$('action-status').textContent='Starting '+button.dataset.action+'…';
+  button.disabled=true;$('action-status').textContent='Starting '+button.dataset.action+'…';$('demo-status').textContent=$('action-status').textContent;
   try{
     const response=await fetch('/api/action/'+button.dataset.action,{
       method:'POST',headers:{'X-ISLab-Action-Token':ACTION_TOKEN}
     });
     const result=await response.json();if(!response.ok)throw Error(result.error||'HTTP '+response.status);
     await refreshAction();
-  }catch(error){$('action-status').textContent='Could not start action: '+error.message;button.disabled=false}
+  }catch(error){$('action-status').textContent='Could not start action: '+error.message;$('demo-status').textContent=$('action-status').textContent;button.disabled=false}
 });
 refresh();refreshAction();refreshCapture();setInterval(refresh,4000);setInterval(refreshAction,2000);setInterval(refreshCapture,2000);
 </script></body></html>'''
