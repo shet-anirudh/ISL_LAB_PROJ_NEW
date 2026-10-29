@@ -33,7 +33,8 @@ TELEMETRY_PORT = 9083
 class ActionController:
     """At most one local, allowlisted C2 action at a time."""
 
-    ALLOWED = {"PING", "START_ENCRYPT", "START_EXFIL", "ANALYZE_PCAP", "VERIFY_SIGNATURE"}
+    ALLOWED = {"PING", "START_ENCRYPT", "START_EXFIL", "ANALYZE_PCAP", "VERIFY_SIGNATURE",
+               "VERIFY_DATASET", "RUN_BACKUP", "RESTORE_TRIAL"}
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -119,6 +120,15 @@ class ActionController:
                 data = response["data"]
                 if command == "START_ENCRYPT" and not (data.get("executed") and data.get("contained")):
                     raise RuntimeError("Victim did not confirm copy-only containment")
+                if command == "VERIFY_DATASET" and not (data.get("executed") and
+                                                           data.get("intact") and data.get("files") == 20):
+                    raise RuntimeError("Victim did not confirm 20 baseline files")
+                if command == "RUN_BACKUP" and not (data.get("executed") and
+                                                      data.get("verified") and data.get("files") == 20):
+                    raise RuntimeError("Victim did not confirm a verified backup")
+                if command == "RESTORE_TRIAL" and not (data.get("executed") and
+                                                        data.get("files") == 20 and data.get("trial")):
+                    raise RuntimeError("Victim did not confirm an isolated restore")
                 if command == "START_EXFIL":
                     receiver_thread.join(timeout=28)
                     if "error" in receiver_result or receiver_thread.is_alive():
@@ -129,6 +139,12 @@ class ActionController:
                     detail = f"Recovered {record['file']} ({record['bytes']} bytes), SHA-256 verified"
                 elif command == "START_ENCRYPT":
                     detail = f"Contained copy-only trial {data['trial']}"
+                elif command == "VERIFY_DATASET":
+                    detail = "Victim verified all 20 baseline files"
+                elif command == "RUN_BACKUP":
+                    detail = f"TLS backup {data['snapshot']} verified (20 files)"
+                elif command == "RESTORE_TRIAL":
+                    detail = f"Restored {data['snapshot']} into isolated {data['trial']} (20 files)"
                 else:
                     detail = "Victim acknowledged PING (dry run)"
                 state = "completed"
@@ -463,6 +479,10 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 <button class="action-button" data-action="START_EXFIL">Transfer synthetic PDF</button>
 <button class="action-button" data-action="ANALYZE_PCAP">Analyze latest PCAP</button>
 <button class="action-button" data-action="VERIFY_SIGNATURE">Verify evaluation signature</button></div>
+<h3>Victim defense workflows</h3><p class="muted">These signed requests verify the synthetic baseline, create a verified TLS backup, or restore only into an isolated trial directory.</p>
+<div class="action-buttons"><button class="action-button" data-action="VERIFY_DATASET">Verify dataset</button>
+<button class="action-button" data-action="RUN_BACKUP">Create TLS backup</button>
+<button class="action-button" data-action="RESTORE_TRIAL">Restore latest backup to trial</button></div>
 <div class="action-status" id="action-status" role="status">No action run yet.</div></section></div>
 <div class="tab-view" id="tab-text" hidden><section class="panel"><h2>Text encryption</h2><div id="security-text"></div></section></div>
 <div class="tab-view" id="tab-image" hidden><section class="panel"><h2>RGB image analysis</h2><div id="security-image"></div></section></div>

@@ -79,7 +79,7 @@ def copy_exact(stream, destination, length):
     return digest.hexdigest()
 
 
-def serve_once():
+def serve_once(*, ready=None, accept_timeout=30):
     files = expected_files()
     if not CERT.is_file() or not KEY.is_file():
         raise FileNotFoundError("Generate backup.crt and backup.key on the victim first")
@@ -92,7 +92,10 @@ def serve_once():
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((VICTIM_IP, BACKUP_PORT))
         listener.listen(1)
+        listener.settimeout(accept_timeout)
         print(f"Backup TLS listening on {VICTIM_IP}:{BACKUP_PORT} for one victim connection", flush=True)
+        if ready is not None:
+            ready.set()
         raw, peer = listener.accept()
         with raw:
             raw.settimeout(30)
@@ -125,6 +128,7 @@ def serve_once():
                     send_header(stream, {"ok": True, "snapshot": destination.name,
                                          "count": len(files)})
                     print(f"PASS: saved {len(files)} verified files to {destination}", flush=True)
+                    return destination
                 finally:
                     if staging.exists():
                         shutil.rmtree(staging)
@@ -151,6 +155,7 @@ def backup():
             if response.get("ok") is not True or response.get("count") != len(files):
                 raise ValueError(f"Backup failed: {response}")
             print(f"PASS: TLS backup saved {len(files)} files as {response['snapshot']}")
+            return response
 
 
 def snapshot_files(snapshot):
@@ -184,6 +189,7 @@ def restore_to_trial(snapshot):
                 raise ValueError(f"Restored hash mismatch: {name}")
         print(f"PASS: restored {len(files)} files into disposable trial {trial}")
         print("Original MILITARY_DATA was not modified")
+        return trial
     except Exception:
         shutil.rmtree(trial)
         raise

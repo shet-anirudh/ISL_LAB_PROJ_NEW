@@ -1,9 +1,9 @@
 """Victim-side signed C2 client for the synthetic lab.
 
 Run on victim after Kali server is listening: python3 -m victim.c2_client
-With --enable-synthetic-actions, signed START_ENCRYPT runs the copy-only
-containment trial and signed START_EXFIL transfers one fixed synthetic sample.
-Other commands remain dry-run.
+With --enable-synthetic-actions, signed allowlisted commands can run the
+copy-only containment trial, fixed synthetic transfer, dataset verification,
+TLS backup, or isolated restore. PING and STOP remain dry-run.
 Use --loop --enable-synthetic-actions to arm repeated dashboard actions.
 """
 
@@ -11,10 +11,11 @@ import argparse
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
-from config import ATTACKER_IP, AUTH_MODE, C2_PORT, PROJECT_ROOT
+from config import ATTACKER_IP, AUTH_MODE, BACKUP_DIR, C2_PORT, PROJECT_ROOT
 from shared.c2_protocol import COMMANDS, log_event, pack, unpack
 
 
@@ -97,6 +98,71 @@ def receive_once(*, enable_synthetic_actions=False):
                                         data={"reason": reason}))
                 print(f"REJECT: {reason}")
             return
+        if command in {"VERIFY_DATASET", "RUN_BACKUP", "RESTORE_TRIAL"} and enable_synthetic_actions:
+            if not AUTH_MODE or not message["authenticated"]:
+                reason = "Synthetic actions require authenticated C2"
+                log_event("command_rejected", role="victim", cmd=command, reason=reason)
+                connection.sendall(pack("REJECT", signed=AUTH_MODE, data={"reason": reason}))
+                print(f"REJECT: {reason}")
+                return
+            server = None
+            try:
+                if command == "VERIFY_DATASET":
+                    checked = subprocess.run(
+                        [sys.executable, "-m", "victim.full_dataset", "--verify"],
+                        cwd=Path(PROJECT_ROOT), capture_output=True, text=True,
+                        timeout=30, check=True)
+                    if "PASS: 20 generated files match" not in checked.stdout:
+                        raise RuntimeError("Dataset verifier did not confirm all 20 files")
+                    result = {"cmd": command, "executed": True, "intact": True, "files": 20}
+                elif command == "RUN_BACKUP":
+                    from victim.backup_service import backup, serve_once, snapshot_files
+                    ready = threading.Event()
+                    outcome = {}
+
+                    def server_job():
+                        try:
+                            outcome["path"] = serve_once(ready=ready, accept_timeout=25)
+                        except Exception as exc:
+                            outcome["error"] = str(exc)[:160]
+                            ready.set()
+
+                    server = threading.Thread(target=server_job, daemon=True)
+                    server.start()
+                    if not ready.wait(timeout=5) or "error" in outcome:
+                        raise RuntimeError(outcome.get("error", "Backup TLS server did not start"))
+                    response = backup()
+                    server.join(timeout=35)
+                    if server.is_alive() or "error" in outcome:
+                        raise RuntimeError(outcome.get("error", "Backup TLS server did not finish"))
+                    snapshot_name = response["snapshot"]
+                    snapshot_files(Path(BACKUP_DIR) / snapshot_name)
+                    result = {"cmd": command, "executed": True,
+                              "snapshot": snapshot_name, "files": 20, "verified": True}
+                else:
+                    from victim.backup_service import restore_to_trial, snapshot_files
+                    root = Path(BACKUP_DIR)
+                    snapshots = [p for p in root.glob("snapshot-*")
+                                 if p.is_dir() and not p.is_symlink()]
+                    if not snapshots:
+                        raise FileNotFoundError("No backup snapshot exists")
+                    latest = max(snapshots, key=lambda p: p.stat().st_mtime_ns)
+                    snapshot_files(latest)
+                    trial = restore_to_trial(latest)
+                    result = {"cmd": command, "executed": True,
+                              "snapshot": latest.name, "trial": trial.name, "files": 20}
+                log_event("synthetic_action_completed", role="victim", **result)
+                connection.sendall(pack("ACK", signed=True, data=result))
+                print(f"ACK: {command} completed: {result}")
+            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired) as exc:
+                if server is not None and server.is_alive():
+                    server.join(timeout=26)
+                reason = f"Controlled {command} failed: {str(exc)[:160]}"
+                log_event("synthetic_action_failed", role="victim", cmd=command, reason=reason)
+                connection.sendall(pack("REJECT", signed=True, data={"reason": reason}))
+                print(f"REJECT: {reason}")
+            return
         connection.sendall(pack("ACK", signed=AUTH_MODE, data={"cmd": command, "executed": False}))
         print(f"ACK: {command} accepted (dry run; no action executed)")
 
@@ -104,7 +170,7 @@ def receive_once(*, enable_synthetic_actions=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--enable-synthetic-actions", action="store_true",
-                        help="Allow signed START_ENCRYPT and START_EXFIL on synthetic samples")
+                        help="Allow signed, fixed synthetic attack and defense actions")
     parser.add_argument("--loop", action="store_true",
                         help="Poll for successive allowlisted commands until Ctrl+C")
     parser.add_argument("--interval", type=float, default=1.0,
