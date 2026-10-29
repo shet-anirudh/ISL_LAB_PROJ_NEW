@@ -1,0 +1,233 @@
+{
+  "description": "Controlled synthetic copy-only evaluation; no original files modified",
+  "generated_utc": "2026-10-29T13:07:43.487485+00:00",
+  "pairs": 10,
+  "runs": [
+    {
+      "mode": "with",
+      "trial": "simtrial-y8b2bli7",
+      "decoy_copies": 1,
+      "real_copies": 0,
+      "total_copies": 1,
+      "original_intact": true,
+      "pid": 4121,
+      "alert_to_stop_ms": 2.0,
+      "kill_response_ms": 0.879,
+      "pair": 1
+    },
+    {
+      "mode": "without",
+      "trial": "simtrial-nvzhphza",
+      "decoy_copies": 5,
+      "real_copies": 5,
+      "total_copies": 10,
+      "original_intact": true,
+      "elapsed_s": 0.0066,
+      "pair": 1
+    },
+    {
+      "mode": "without",
+      "trial": "simtrial-2qsyxe31",
+      "decoy_copies": 5,
+      "real_copies": 5,
+      "total_copies": 10,
+      "original_intact": true,
+      "elapsed_s": 0.0082,
+      "pair": 2
+    },
+    {
+      "mode": "with",
+      "trial": "simtrial-c7jpfkwa",
+      "decoy_copies": 1,
+      "real_copies": 0,
+      "total_copies": 1,
+      "original_intact": true,
+      "pid": 4128,
+      "alert_to_stop_ms": 1.0,
+      "kill_response_ms": 0.871,
+      "pair": 2
+    },
+    {
+      "mode": "with",
+      "trial": "simtrial-45wclhxy",
+      "decoy_copies": 1,
+      "real_copies": 0,
+      "total_copies": 1,
+      "original_intact": true,
+      "pid": 4133,
+      "alert_to_stop_ms": 11.0,
+      "kill_response_ms": 10.453,
+      "pair": 3
+    },
+    {
+      "mode": "without",
+      "trial": "simtrial-e5kndezz",
+      "decoy_copies": 5,
+      "real_copies": 5,
+      "total_copies": 10,
+      "original_intact": true,
+      "elapsed_s": 0.0065,
+      "pair": 3
+    },
+    {
+      "mode": "without",
+      "trial": "simtrial-xjoer73p",
+      "decoy_copies": 5,
+      "real_copies": 5,
+      "total_copies": 10,
+      "original_intact": true,
+      "elapsed_s": 0.0066,
+      "pair": 4
+    },
+    {
+      "mode": "with",
+      "trial": "simtrial-__yd9kk5",
+      "decoy_copies": 1,
+      "real_copies": 0,
+      "total_copies": 1,
+      "original_intact": true,
+      "pid": 4140,
+      "alert_to_stop_ms": 11.0,
+      "kill_response_ms": 10.941,
+      "pair": 4
+    },
+    {
+      "mode": "with",
+      "trial": "simtrial-cjyfjn72",
+      "decoy_copies": 1,
+      "real_copies": 0,
+      "total_copies": 1,
+      "original_intact": true,
+      "pid": 4145,
+      "alert_to_stop_ms": 1.0,
+      "kill_response_ms": 0.966,
+      "pair": 5
+    },
+    {
+      "mode": "without",
+      "trial": "simtrial-im52d_9i",
+      "decoy_copies": 5,
+      "real_copies": 5,
+      "total_copies": 10,
+      "original_intact": true,
+      "elapsed_s": 0.0073,
+      "pair": 5
+    },
+    {
+      "mode": "without",
+      "trial": "simtrial-vtlyedbd",
+      "decoy_copies": 5,
+      "real_copies": 5,
+      "total_copies": 10,
+      "original_intact": true,
+      "elapsed_s": 0.0064,
+      "pair": 6
+    },
+    {
+      "mode": "with",
+      "trial": "simtrial-g_qpor3m",
+      "decoy_copies": 1,
+      "real_copies": 0,
+      "total_copies": 1,
+      "original_intact": true,
+      "pid": 4152,
+      "alert_to_stop_ms": 11.0,
+      "kill_response_ms": 10.527,
+      "pair": 6
+    },
+    {
+      "mode": "with",
+      "trial": "simtrial-ew99lm9c",
+      "decoy_copies": 1,
+      "real_copies": 0,
+      "total_copies": 1,
+      "original_intact": true,
+      "pid": 4157,
+      "alert_to_stop_ms": 11.0,
+      "kill_response_ms": 10.454,
+      "pair": 7
+    },
+    {
+      "mode": "without",
+      "trial": "simtrial-fi3j1kg_",
+      "decoy_copies": 5,
+      "real_copies": 5,
+      "total_copies": 10,
+      "original_intact": true,
+      "elapsed_s": 0.0065,
+      "pair": 7
+    },
+    {
+      "mode": "without",
+      "trial": "simtrial-mqakzs7t",
+      "decoy_copies": 5,
+      "real_copies": 5,
+      "total_copies": 10,
+      "original_intact": true,
+      "elapsed_s": 0.0064,
+      "pair": 8
+    },
+    {
+      "mode": "with",
+      "trial": "simtrial-aio2anuz",
+      "decoy_copies": 1,
+      "real_copies": 0,
+      "total_copies": 1,
+      "original_intact": true,
+      "pid": 4164,
+      "alert_to_stop_ms": 1.0,
+      "kill_response_ms": 0.848,
+      "pair": 8
+    },
+    {
+      "mode": "with",
+      "trial": "simtrial-t_avq5fj",
+      "decoy_copies": 1,
+      "real_copies": 0,
+      "total_copies": 1,
+      "original_intact": true,
+      "pid": 4169,
+      "alert_to_stop_ms": 11.0,
+      "kill_response_ms": 10.554,
+      "pair": 9
+    },
+    {
+      "mode": "without",
+      "trial": "simtrial-lolw_ljs",
+      "decoy_copies": 5,
+      "real_copies": 5,
+      "total_copies": 10,
+      "original_intact": true,
+      "elapsed_s": 0.0066,
+      "pair": 9
+    },
+    {
+      "mode": "without",
+      "trial": "simtrial-0gzwzhyf",
+      "decoy_copies": 5,
+      "real_copies": 5,
+      "total_copies": 10,
+      "original_intact": true,
+      "elapsed_s": 0.0065,
+      "pair": 10
+    },
+    {
+      "mode": "with",
+      "trial": "simtrial-12xfsoht",
+      "decoy_copies": 1,
+      "real_copies": 0,
+      "total_copies": 1,
+      "original_intact": true,
+      "pid": 4176,
+      "alert_to_stop_ms": 1.0,
+      "kill_response_ms": 0.955,
+      "pair": 10
+    }
+  ],
+  "summary": {
+    "with_real_copies_median": 0.0,
+    "without_real_copies_median": 5.0,
+    "alert_to_stop_ms_median": 6.5,
+    "kill_response_ms_median": 5.709499999999999
+  }
+}
