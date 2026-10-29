@@ -1,0 +1,40 @@
+{
+  "generated_utc": "2026-10-29T13:20:47.304943+00:00",
+  "source": "02_Intelligence/marker.jpg",
+  "source_sha256": "c89b44fb129a6d0bf24233f559dc6313e6c094381e06155318cbe93eab2d33b6",
+  "algorithm": "AES-256-CBC on decoded RGB bytes, PKCS7 padding",
+  "image": {
+    "width": 1024,
+    "height": 768,
+    "channels": 3
+  },
+  "previews": {
+    "original": "results/image_security_1793280047164010042/original.png",
+    "encrypted": "results/image_security_1793280047164010042/encrypted_pixels.png",
+    "recovered": "results/image_security_1793280047164010042/recovered.png"
+  },
+  "metrics": {
+    "npcr_ciphertexts_one_plaintext_bit_pct": 100.0,
+    "uaci_ciphertexts_one_plaintext_bit_pct": 33.441654,
+    "entropy_original_bits_per_byte": 3.630476,
+    "entropy_encrypted_bits_per_byte": 7.999919,
+    "horizontal_red_correlation_original": 0.975292,
+    "horizontal_red_correlation_encrypted": 0.008245,
+    "mse_original_to_encrypted": 7273.037164,
+    "psnr_original_to_encrypted_db": 9.513646,
+    "mse_original_to_recovered": 0.0,
+    "psnr_original_to_recovered_db": "Infinity"
+  },
+  "timings_ms_median": {
+    "encrypt": 2.531966,
+    "decrypt": 1.647476
+  },
+  "trials": 10,
+  "metric_definition": {
+    "npcr_uaci": "Compare two ciphertext RGB visualizations with identical key and IV, after flipping one bit in the first plaintext pixel. NPCR is fraction of changed RGB pixels; UACI averages absolute differences across RGB channels divided by 255.",
+    "entropy": "Shannon entropy across all decoded RGB channel byte values.",
+    "correlation": "Pearson correlation of up to 10,000 evenly sampled horizontal neighbor red-channel pairs; null means zero variance.",
+    "mse_psnr": "Compare original RGB against encrypted pixel visualization and against recovered RGB. Perfect recovery has MSE 0 and PSNR Infinity, stored as a string in JSON.",
+    "visualization": "First width*height*3 ciphertext bytes mapped to RGB. This is not a valid encrypted JPEG file format."
+  }
+}

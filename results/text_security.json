@@ -1,0 +1,113 @@
+{
+  "generated_utc": "2026-10-29T13:17:34.034916+00:00",
+  "algorithm": "AES-256-CBC with PKCS7 padding",
+  "source": "01_Operations/mission_brief.txt",
+  "plaintext": "SYNTHETIC TRAINING DATA — NOT REAL\nExercise: OP-2824\nLocation: SECTOR-13 (fictional)\nStatus: simulated\n",
+  "ciphertext_base64": "njqM779LujL23Ds560yCiB48u5W1PY8ygK5yeENfy68t5QjVVx593F7DaS4m99sdT/azmBbVam6RkMCTuSj1OVBuGF7IA8HlILLrtaNMM36eEOkZLGuzvDEoaGd8EheYPU9qnLW7HxLVsFFTEGDZAQ==",
+  "iv_base64": "Gi6moz66D54vVUHXPd+nig==",
+  "recovered_plaintext": "SYNTHETIC TRAINING DATA — NOT REAL\nExercise: OP-2824\nLocation: SECTOR-13 (fictional)\nStatus: simulated\n",
+  "plaintext_bytes": 105,
+  "ciphertext_bytes": 112,
+  "trials": 10,
+  "timings_ms_median": {
+    "encrypt": 0.008403,
+    "decrypt": 0.008372
+  },
+  "diffusion_one_plaintext_bit": {
+    "trials": [
+      {
+        "bit_change_pct": 51.228,
+        "hex_character_change_pct": 94.196
+      },
+      {
+        "bit_change_pct": 49.442,
+        "hex_character_change_pct": 95.089
+      },
+      {
+        "bit_change_pct": 50.112,
+        "hex_character_change_pct": 93.304
+      },
+      {
+        "bit_change_pct": 50.781,
+        "hex_character_change_pct": 95.982
+      },
+      {
+        "bit_change_pct": 49.777,
+        "hex_character_change_pct": 91.518
+      },
+      {
+        "bit_change_pct": 48.996,
+        "hex_character_change_pct": 95.089
+      },
+      {
+        "bit_change_pct": 48.661,
+        "hex_character_change_pct": 94.196
+      },
+      {
+        "bit_change_pct": 49.219,
+        "hex_character_change_pct": 94.196
+      },
+      {
+        "bit_change_pct": 51.339,
+        "hex_character_change_pct": 94.643
+      },
+      {
+        "bit_change_pct": 47.098,
+        "hex_character_change_pct": 91.071
+      }
+    ],
+    "summary": {
+      "bit_change_pct_median": 49.6095,
+      "hex_character_change_pct_median": 94.196
+    }
+  },
+  "confusion_one_key_bit": {
+    "trials": [
+      {
+        "bit_change_pct": 52.232,
+        "hex_character_change_pct": 95.982
+      },
+      {
+        "bit_change_pct": 47.321,
+        "hex_character_change_pct": 92.857
+      },
+      {
+        "bit_change_pct": 47.991,
+        "hex_character_change_pct": 90.625
+      },
+      {
+        "bit_change_pct": 48.438,
+        "hex_character_change_pct": 91.964
+      },
+      {
+        "bit_change_pct": 53.348,
+        "hex_character_change_pct": 95.982
+      },
+      {
+        "bit_change_pct": 55.022,
+        "hex_character_change_pct": 96.429
+      },
+      {
+        "bit_change_pct": 49.219,
+        "hex_character_change_pct": 94.196
+      },
+      {
+        "bit_change_pct": 48.772,
+        "hex_character_change_pct": 93.75
+      },
+      {
+        "bit_change_pct": 51.786,
+        "hex_character_change_pct": 93.304
+      },
+      {
+        "bit_change_pct": 49.107,
+        "hex_character_change_pct": 94.643
+      }
+    ],
+    "summary": {
+      "bit_change_pct_median": 49.163,
+      "hex_character_change_pct_median": 93.973
+    }
+  },
+  "metric_definition": "Same key and IV for each comparison. Bit change is Hamming distance over ciphertext bits; character change is positional difference over hexadecimal ciphertext characters. Hex digit values are not plaintext characters. These sample measurements are not cryptographic proofs or guaranteed percentages."
+}

@@ -107,6 +107,37 @@ def _latest_trial():
             "complete": complete, "count": len(locked)}
 
 
+def _security_data():
+    """Read bounded, locally generated measurement summaries for the UI."""
+    results = ROOT / "results"
+    text_result = _json_file(results / "text_security.json", {})
+    image_dirs = [p for p in results.glob("image_security_*")
+                  if p.is_dir() and not p.is_symlink()]
+    image_dir = max(image_dirs, key=lambda p: p.stat().st_mtime_ns) if image_dirs else None
+    image_result = _json_file(image_dir / "metrics.json", {}) if image_dir else {}
+    evaluations = [p for p in results.glob("defense_evaluation_*.json")
+                   if p.is_file() and not p.is_symlink()]
+    evaluation = _json_file(max(evaluations, key=lambda p: p.stat().st_mtime_ns), {}) if evaluations else {}
+    signatures = [p for p in (results / "signatures").glob("*.sig.json")
+                  if p.is_file() and not p.is_symlink()]
+    signature = _json_file(max(signatures, key=lambda p: p.stat().st_mtime_ns), {}) if signatures else {}
+    crypto = _json_file(results / "crypto_benchmarks.json", {})
+    return {
+        "text": {key: text_result.get(key) for key in
+                 ("plaintext", "ciphertext_base64", "recovered_plaintext", "timings_ms_median",
+                  "diffusion_one_plaintext_bit", "confusion_one_key_bit")},
+        "image": {"metrics": image_result.get("metrics"),
+                  "timings_ms_median": image_result.get("timings_ms_median"),
+                  "previews_available": image_dir is not None and all(
+                      (image_dir / filename).is_file() and not (image_dir / filename).is_symlink()
+                      for filename in ("original.png", "encrypted_pixels.png", "recovered.png"))},
+        "evaluation": {"pairs": evaluation.get("pairs"), "summary": evaluation.get("summary")},
+        "signature": {key: signature.get(key) for key in
+                      ("sha256", "signature_base64", "timings_ms_median", "tampered_byte_rejected")},
+        "crypto": crypto.get("measurements", {}),
+    }
+
+
 def _victim():
     baseline = _baseline()
     data_root = Path(TEST_DATA_DIR)
@@ -156,6 +187,7 @@ def _victim():
             {"label": "C2 messages", "value": str(len(c2)) + " · dry-run commands"},
         ],
         "events": _event_feed([honeypot, containment, simulator, transfer, c2]),
+        "security": _security_data(),
     }
 
 
@@ -239,6 +271,7 @@ def _attacker():
             {"label": "Latest victim trial", "value": trial.get("name", "Unknown") if trial else "None reported"},
         ],
         "events": _event_feed([transfer, c2, remote_events]),
+        "security": remote.get("security") if remote else _security_data(),
     }
 
 
@@ -261,22 +294,91 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 .row{display:flex;justify-content:space-between;gap:20px;border-bottom:1px solid #26374a;padding:11px 0;font-size:13px}.row:last-child{border:0}.row span:first-child{color:#9badbf}.row span:last-child{text-align:right;overflow-wrap:anywhere}
 .bars{display:grid;gap:18px}.barhead{display:flex;justify-content:space-between;color:#b9cddd;font-size:13px;margin-bottom:7px}.track{height:10px;border-radius:8px;background:#28384b;overflow:hidden}.fill{height:100%;border-radius:8px;background:#42c9af;transition:width .3s}.fill.real{background:#ff9878}
 .scroll{max-height:390px;overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}th{color:#8fa6ba;font-weight:650;position:sticky;top:0;background:#142235}td,th{padding:11px 9px;border-bottom:1px solid #26374a;vertical-align:top}td{overflow-wrap:anywhere}.ok{color:#65dec2}.bad{color:#ff9b83}
+.measure-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}.measure-grid h3{margin:12px 0;font-size:15px}.measure-grid pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1727;border:1px solid #294059;border-radius:10px;padding:12px;max-height:170px;overflow:auto;font-size:12px}.previews{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}.previews img{width:100%;height:auto;aspect-ratio:4/3;object-fit:contain;background:#0b1727;border:1px solid #294059;border-radius:9px}.previews figure{margin:0}.previews figcaption{font-size:12px;color:#a6b8cb;margin-top:7px}.measure-note{color:#9badbf;font-size:12px;line-height:1.5}
 @media(max-width:850px){.cards{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.wide{grid-column:auto}}@media(max-width:520px){.cards{grid-template-columns:1fr 1fr}.card{padding:14px}.value{font-size:27px}main{padding:20px 14px}.pill{display:none}}
 </style></head><body><main>
 <header><div><div class="eyebrow">IS Lab · Synthetic Environment</div><h1 id="title">Dashboard</h1><div class="muted" id="updated">Loading local evidence…</div></div><span class="pill">READ ONLY · LAB VM</span></header>
 <section class="cards" id="cards"></section><div class="grid"><section class="panel"><h2>Activity summary</h2><div id="summary"></div></section>
 <section class="panel"><h2 id="chart-title">Latest trial</h2><div class="bars" id="visual"></div></section>
+<section class="panel wide" id="security-panel" hidden><h2>Security and efficiency measurements</h2><div class="measure-grid" id="security"></div></section>
 <section class="panel wide"><h2>Recent recorded events</h2><div class="scroll"><table><thead><tr><th>Time (UTC)</th><th>Module</th><th>Event</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table></div></section></div>
 </main><script>
 const $=id=>document.getElementById(id);
 function el(tag,cls,content){const node=document.createElement(tag);if(cls)node.className=cls;if(content!==undefined)node.textContent=String(content);return node}
+function measurement(container,label,value,max,unit){
+  if(typeof value!=='number'||!isFinite(value))return;
+  const head=el('div','barhead');head.append(el('span','',label),el('strong','',value.toFixed(3)+' '+unit));
+  const track=el('div','track'),fill=el('div','fill');fill.style.width=Math.min(100,Math.max(0,value/max*100))+'%';
+  track.append(fill);container.append(head,track);
+}
+function metricRow(container,label,value){const row=el('div','row');row.append(el('span','',label),el('span','',value));container.append(row)}
+function section(parent,title){const box=el('div','');box.append(el('h3','',title));parent.append(box);return box}
+let lastSecurity='';
+function drawSecurity(data){
+  const sec=data.security||{},text=sec.text||{},im=sec.image||{},ev=sec.evaluation||{},sig=sec.signature||{},crypto=sec.crypto||{};
+  const fingerprint=JSON.stringify(sec)+data.role;if(fingerprint===lastSecurity)return;lastSecurity=fingerprint;
+  const panel=$('security-panel'),root=$('security');root.replaceChildren();
+  const has=Boolean(text.plaintext||im.metrics||ev.summary||sig.sha256||Object.keys(crypto).length);panel.hidden=!has;if(!has)return;
+  if(text.plaintext){
+    const box=section(root,'Text encryption and one-bit changes');
+    for(const [label,value] of [['Plaintext',text.plaintext],['Ciphertext (Base64)',text.ciphertext_base64],['Recovered',text.recovered_plaintext]]){
+      box.append(el('div','label',label),el('pre','',value||''));
+    }
+    const diffusion=text.diffusion_one_plaintext_bit||{},confusion=text.confusion_one_key_bit||{};
+    measurement(box,'Diffusion, ciphertext bits',diffusion.summary&&diffusion.summary.bit_change_pct_median,100,'%');
+    measurement(box,'Confusion, ciphertext bits',confusion.summary&&confusion.summary.bit_change_pct_median,100,'%');
+    box.append(el('p','measure-note','One plaintext bit or one key bit changes with fixed IV. Bars show measured ciphertext Hamming distances.'));
+  }
+  if(im.metrics){
+    const box=section(root,'RGB image measurements'),m=im.metrics;
+    measurement(box,'Original entropy',m.entropy_original_bits_per_byte,8,'bits/byte');
+    measurement(box,'Encrypted entropy',m.entropy_encrypted_bits_per_byte,8,'bits/byte');
+    for(const [label,key,unit] of [
+      ['NPCR','npcr_ciphertexts_one_plaintext_bit_pct','%'],['UACI','uaci_ciphertexts_one_plaintext_bit_pct','%'],
+      ['Original neighbor correlation','horizontal_red_correlation_original',''],
+      ['Encrypted neighbor correlation','horizontal_red_correlation_encrypted',''],
+      ['Original to encrypted MSE','mse_original_to_encrypted',''],['Original to encrypted PSNR','psnr_original_to_encrypted_db','dB'],
+      ['Original to recovered MSE','mse_original_to_recovered',''],['Original to recovered PSNR','psnr_original_to_recovered_db','dB']
+    ])metricRow(box,label,typeof m[key]==='number'?m[key].toFixed(4)+' '+unit:String(m[key]));
+    box.append(el('p','measure-note','Ciphertext bytes are mapped to RGB pixels for display. NPCR and UACI compare two ciphertext views after one plaintext-bit change.'));
+  }
+  if(ev.summary){
+    const box=section(root,'Containment comparison'),s=ev.summary;
+    box.append(el('p','muted',ev.pairs+' trial pairs · copy-only simulator'));
+    measurement(box,'Real copies with monitoring',s.with_real_copies_median,5,'median');
+    measurement(box,'Real copies without monitoring',s.without_real_copies_median,5,'median');
+    box.append(el('p','measure-note','Median alert-to-stop: '+Number(s.alert_to_stop_ms_median).toFixed(3)+' ms. Original dataset remains unchanged.'));
+  }
+  const perf=[];
+  if(text.timings_ms_median)perf.push(['Text encrypt',text.timings_ms_median.encrypt],['Text decrypt',text.timings_ms_median.decrypt]);
+  if(im.timings_ms_median)perf.push(['RGB encrypt',im.timings_ms_median.encrypt],['RGB decrypt',im.timings_ms_median.decrypt]);
+  for(const kind of ['audio','video'])if(crypto[kind])perf.push([kind+' encrypt',crypto[kind].aes_encrypt_median_ms],[kind+' decrypt',crypto[kind].aes_decrypt_median_ms]);
+  if(perf.length){
+    const box=section(root,'AES processing time'),numbers=perf.map(x=>x[1]).filter(x=>typeof x==='number');
+    const max=Math.max(...numbers,.001);for(const [label,value] of perf)measurement(box,label,value,max,'ms');
+    box.append(el('p','measure-note','Median time per sample. File sizes differ; use throughput for size-normalized comparison.'));
+  }
+  if(sig.sha256){
+    const box=section(root,'Stored digital signature');
+    box.append(el('div','label','SHA-256 digest'),el('pre','',sig.sha256),el('div','label','RSA-PSS signature (Base64)'),el('pre','',sig.signature_base64||''));
+    const timing=sig.timings_ms_median||{};
+    box.append(el('p','measure-note','Median hash '+timing.sha256+' ms · sign '+timing.sign+' ms · verify '+timing.verify+' ms · tamper rejected: '+Boolean(sig.tampered_byte_rejected)+'. Displayed record; independently verify using tests.signature_demo.'));
+  }
+  if(data.role==='victim'&&im.previews_available){
+    const box=section(root,'RGB pixel previews'),gallery=el('div','previews');
+    for(const [name,label] of [['original','Original RGB'],['encrypted','Ciphertext pixels'],['recovered','Recovered RGB']]){
+      const figure=el('figure',''),picture=el('img','');picture.src='/api/security-image/'+name;picture.alt=label;
+      figure.append(picture,el('figcaption','',label));gallery.append(figure);
+    }box.append(gallery);
+  }
+}
 function draw(data){$('title').textContent=data.title;$('updated').textContent='Updated '+data.updated.replace('T',' ')+' UTC · refreshes every 4 seconds';
 const cards=$('cards');cards.replaceChildren();for(const c of data.cards){const box=el('div','card');box.append(el('div','label',c.label),el('div','value',c.value),el('div','note',c.note));cards.append(box)}
 const summary=$('summary');summary.replaceChildren();for(const row of data.summary){const item=el('div','row');item.append(el('span','',row.label),el('span','',row.value));summary.append(item)}
 const visual=$('visual');visual.replaceChildren();
 if(data.role==='victim'){$('chart-title').textContent='Latest encryption trial';const t=data.trial;if(!t){visual.append(el('p','muted','No local simulator trial found.'))}else{for(const [label,n,cls] of [['Decoy copies',t.decoy,''],['Real copies',t.real,'real']]){const wrap=el('div','');const head=el('div','barhead');head.append(el('span','',label),el('strong','',n));const track=el('div','track');const fill=el('div','fill '+cls);fill.style.width=Math.min(100,n/10*100)+'%';track.append(fill);wrap.append(head,track);visual.append(wrap)}visual.append(el('p','muted',t.name+(t.complete?' · completed':' · interrupted or in progress')))}}
 else{$('chart-title').textContent='Local recovered files';if(!data.files.length)visual.append(el('p','muted','No received files yet.'));for(const f of data.files){const row=el('div','row');row.append(el('span','',f.name),el('span',f.valid?'ok':'bad',(f.valid?'SHA-256 verified':'Unverified')+' · '+f.bytes.toLocaleString()+' bytes'));visual.append(row)}}
-const table=$('events');table.replaceChildren();for(const event of data.events){const tr=el('tr','');for(const field of ['ts','module','event','detail'])tr.append(el('td','',event[field]));table.append(tr)}if(!data.events.length){const tr=el('tr','');const td=el('td','muted','No recorded events yet.');td.colSpan=4;tr.append(td);table.append(tr)}}
+const table=$('events');table.replaceChildren();for(const event of data.events){const tr=el('tr','');for(const field of ['ts','module','event','detail'])tr.append(el('td','',event[field]));table.append(tr)}if(!data.events.length){const tr=el('tr','');const td=el('td','muted','No recorded events yet.');td.colSpan=4;tr.append(td);table.append(tr)}drawSecurity(data)}
 async function refresh(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);draw(await response.json())}catch(error){$('updated').textContent='Dashboard data unavailable: '+error.message}}
 refresh();setInterval(refresh,4000);
 </script></body></html>'''
@@ -335,6 +437,29 @@ def serve(role, port):
                     self.send_error(500, f"Could not read dashboard data: {exc}")
                     return
                 kind = "application/json; charset=utf-8"
+            elif role == "victim" and path in {
+                    "/api/security-image/original", "/api/security-image/encrypted",
+                    "/api/security-image/recovered"}:
+                filename = {"original": "original.png", "encrypted": "encrypted_pixels.png",
+                            "recovered": "recovered.png"}[path.rsplit("/", 1)[1]]
+                results = ROOT / "results"
+                directories = [p for p in results.glob("image_security_*")
+                               if p.is_dir() and not p.is_symlink()]
+                if not directories:
+                    self.send_error(404)
+                    return
+                latest = max(directories, key=lambda p: p.stat().st_mtime_ns)
+                image_path = latest / filename
+                if (image_path.is_symlink() or not image_path.is_file() or
+                        not image_path.resolve().is_relative_to(results.resolve()) or
+                        image_path.stat().st_size > 8 * 1024 * 1024):
+                    self.send_error(404)
+                    return
+                body = image_path.read_bytes()
+                if not body.startswith(b"\x89PNG\r\n\x1a\n"):
+                    self.send_error(404)
+                    return
+                kind = "image/png"
             else:
                 self.send_error(404)
                 return
