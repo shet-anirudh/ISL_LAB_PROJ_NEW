@@ -24,8 +24,8 @@ KEY_EXT         = ".key"
 RANSOM_NOTE     = "README_DECRYPT.txt"
 
 # ── Crypto ────────────────────────────────────────────
-RSA_PUB_KEY_PATH  = str(PROJECT_ROOT / "keys" / "public.pem")
-RSA_PRIV_KEY_PATH = str(PROJECT_ROOT / "keys" / "private.pem")
+RSA_PUB_KEY_PATH = str(PROJECT_ROOT / "keys" / "public.pem")
+RSA_PRIV_KEY_PATH = str(Path.home() / ".config" / "islab" / "private.pem")
 BACKUP_CERT_PATH  = str(PROJECT_ROOT / "keys" / "backup.crt")
 BACKUP_KEY_PATH   = str(PROJECT_ROOT / "keys" / "backup.key")
 HMAC_SECRET       = b"change-this-before-demo-day"
