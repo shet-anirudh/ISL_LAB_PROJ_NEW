@@ -13,6 +13,7 @@ import hashlib
 import json
 import statistics
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
@@ -58,10 +59,14 @@ def _fingerprint(public):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _timed(operation):
+def _timed(operation, name=None, timeline=None):
+    stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     start = time.perf_counter_ns()
     result = operation()
-    return result, time.perf_counter_ns() - start
+    elapsed = time.perf_counter_ns() - start
+    if timeline is not None:
+        timeline.append({"ts": stamp, "operation": name, "duration_ms": round(elapsed / 1e6, 6)})
+    return result, elapsed
 
 
 def sign_artifact(source, *, private_path=PRIVATE, public_path=PUBLIC,
@@ -79,15 +84,16 @@ def sign_artifact(source, *, private_path=PRIVATE, public_path=PUBLIC,
     if private.public_key().public_numbers() != public.public_numbers():
         raise ValueError("Signing private key does not match committed public key")
     data = source.read_bytes()
-    hashes_ns = [_timed(lambda: hashlib.sha256(data).digest())[1]
+    timeline = []
+    hashes_ns = [_timed(lambda: hashlib.sha256(data).digest(), "hash", timeline)[1]
                  for _ in range(TRIALS)]
-    signature, first_ns = _timed(lambda: private.sign(data, _pss(), hashes.SHA256()))
+    signature, first_ns = _timed(lambda: private.sign(data, _pss(), hashes.SHA256()), "sign", timeline)
     sign_ns = [first_ns]
-    sign_ns.extend(_timed(lambda: private.sign(data, _pss(), hashes.SHA256()))[1]
+    sign_ns.extend(_timed(lambda: private.sign(data, _pss(), hashes.SHA256()), "sign", timeline)[1]
                    for _ in range(TRIALS - 1))
     verify_ns = []
     for _ in range(TRIALS):
-        _, elapsed = _timed(lambda: public.verify(signature, data, _pss(), hashes.SHA256()))
+        _, elapsed = _timed(lambda: public.verify(signature, data, _pss(), hashes.SHA256()), "verify", timeline)
         verify_ns.append(elapsed)
     altered = bytearray(data)
     if altered:
@@ -101,6 +107,7 @@ def sign_artifact(source, *, private_path=PRIVATE, public_path=PUBLIC,
     else:
         raise AssertionError("Altered bytes unexpectedly passed verification")
     result = {
+        "generated_utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "algorithm": "RSA-PSS-SHA256", "source": source.relative_to(ROOT).as_posix(),
         "source_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
         "public_key_sha256": _fingerprint(public),
@@ -111,6 +118,7 @@ def sign_artifact(source, *, private_path=PRIVATE, public_path=PUBLIC,
             "verify": round(statistics.median(verify_ns) / 1e6, 6),
         },
         "trials": TRIALS, "tampered_byte_rejected": tamper_rejected,
+        "operations": timeline,
     }
     output = Path(destination) if destination is not None else (
         RESULTS / "signatures" / (source.name + ".sig.json"))

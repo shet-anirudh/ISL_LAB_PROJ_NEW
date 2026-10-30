@@ -19,6 +19,15 @@ from shared.crypto import aes_decrypt, rsa_unwrap_key
 from shared.transfer_protocol import receive_header, recv_exact, tag
 
 
+def _measure(name, function, records):
+    ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    started = time.perf_counter_ns()
+    result = function()
+    records.append({"ts": ts, "operation": name,
+                    "duration_ms": round((time.perf_counter_ns() - started) / 1e6, 6)})
+    return result
+
+
 def receive_once(*, ready=None, accept_timeout=60):
     root = Path(PROJECT_ROOT).resolve()
     private_path = Path(RSA_PRIV_KEY_PATH).resolve(strict=True)
@@ -47,11 +56,15 @@ def receive_once(*, ready=None, accept_timeout=60):
             name, size, iv, wrapped, raw_header = receive_header(connection)
             ciphertext = recv_exact(connection, size)
             received_tag = recv_exact(connection, 32)
-            key = rsa_unwrap_key(wrapped, private_path)
-            if not hmac.compare_digest(received_tag, tag(key, raw_header + ciphertext)):
+            operations = []
+            cipher_digest = _measure("hash_ciphertext", lambda: hashlib.sha256(ciphertext).hexdigest(), operations)
+            key = _measure("unwrap_key", lambda: rsa_unwrap_key(wrapped, private_path), operations)
+            valid_tag = _measure("verify_authentication", lambda: hmac.compare_digest(
+                received_tag, tag(key, raw_header + ciphertext)), operations)
+            if not valid_tag:
                 raise ValueError("HMAC verification failed; file not saved")
-            plaintext = aes_decrypt(ciphertext, iv, key)
-            digest = hashlib.sha256(plaintext).hexdigest()
+            plaintext = _measure("decrypt", lambda: aes_decrypt(ciphertext, iv, key), operations)
+            digest = _measure("hash_recovered", lambda: hashlib.sha256(plaintext).hexdigest(), operations)
             if digest != expected_hashes.get(name):
                 raise ValueError("Recovered file differs from committed dataset baseline")
             # A fresh directory preserves prior demo evidence and permits
@@ -64,7 +77,8 @@ def receive_once(*, ready=None, accept_timeout=60):
             elapsed = round(time.perf_counter() - started, 4)
             record = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
                       "module": "transfer", "event": "file_received", "file": name,
-                      "bytes": len(plaintext), "sha256": digest, "elapsed_s": elapsed,
+                      "bytes": len(plaintext), "sha256": digest, "ciphertext_sha256": cipher_digest,
+                      "operations": operations, "elapsed_s": elapsed,
                       "src_ip": address[0], "src_port": address[1],
                       "saved_as": destination.relative_to(root).as_posix()}
             log_dir = Path(LOG_DIR)
