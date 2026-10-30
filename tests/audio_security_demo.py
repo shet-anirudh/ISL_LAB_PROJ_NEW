@@ -22,6 +22,15 @@ SOURCE = "03_Media/briefing.mp3"
 TRIALS = 10
 
 
+def _measure(operation, function, records):
+    ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    start = time.perf_counter_ns()
+    value = function()
+    elapsed = time.perf_counter_ns() - start
+    records.append({"ts": ts, "operation": operation, "duration_ms": round(elapsed / 1e6, 6)})
+    return value, elapsed
+
+
 def run():
     root = Path(TEST_DATA_DIR)
     source = root / SOURCE
@@ -29,24 +38,26 @@ def run():
         raise ValueError("Only the configured synthetic audio is allowed")
     data = source.read_bytes()
     baseline = json.loads((Path(PROJECT_ROOT) / "results" / "baseline_hashes.json").read_text())["files"]
-    digest = hashlib.sha256(data).hexdigest()
+    operations = []
+    digest, _ = _measure("hash_source", lambda: hashlib.sha256(data).hexdigest(), operations)
     if digest != baseline[SOURCE]:
         raise ValueError("Synthetic audio differs from baseline")
     key, iv = generate_aes_key(), generate_iv()
-    ciphertext = aes_encrypt(data, iv, key)
-    recovered = aes_decrypt(ciphertext, iv, key)
-    if hashlib.sha256(recovered).hexdigest() != digest:
+    ciphertext, _ = _measure("encrypt", lambda: aes_encrypt(data, iv, key), operations)
+    cipher_digest, _ = _measure("hash_ciphertext", lambda: hashlib.sha256(ciphertext).hexdigest(), operations)
+    recovered, _ = _measure("decrypt", lambda: aes_decrypt(ciphertext, iv, key), operations)
+    recovered_digest, _ = _measure("hash_recovered", lambda: hashlib.sha256(recovered).hexdigest(), operations)
+    if recovered_digest != digest:
         raise AssertionError("Recovered audio differs from baseline")
     wrapped = rsa_wrap_key(key, RSA_PUB_KEY_PATH)
     encrypt_ns, decrypt_ns = [], []
     for _ in range(TRIALS):
-        start = time.perf_counter_ns()
-        candidate = aes_encrypt(data, iv, key)
-        encrypt_ns.append(time.perf_counter_ns() - start)
-        start = time.perf_counter_ns()
-        if aes_decrypt(candidate, iv, key) != data:
+        candidate, elapsed = _measure("encrypt_trial", lambda: aes_encrypt(data, iv, key), operations)
+        encrypt_ns.append(elapsed)
+        decoded, elapsed = _measure("decrypt_trial", lambda: aes_decrypt(candidate, iv, key), operations)
+        if decoded != data:
             raise AssertionError("Audio round trip failed")
-        decrypt_ns.append(time.perf_counter_ns() - start)
+        decrypt_ns.append(elapsed)
     results = Path(PROJECT_ROOT) / "results"
     if results.is_symlink():
         raise ValueError("Results directory is a symlink")
@@ -58,6 +69,8 @@ def run():
     record = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source": SOURCE, "sha256": digest, "source_bytes": len(data),
+        "ciphertext_sha256": cipher_digest, "recovered_sha256": recovered_digest,
+        "operations": operations,
         "encrypted_bytes": len(iv) + len(ciphertext),
         "ciphertext_prefix_base64": base64.b64encode(ciphertext[:48]).decode("ascii"),
         "algorithm": "AES-256-CBC with PKCS7; RSA-OAEP wrapped AES key",

@@ -35,7 +35,7 @@ TELEMETRY_PORT = 9083
 class ActionController:
     """At most one local, allowlisted C2 action at a time."""
 
-    ALLOWED = {"PING", "START_ENCRYPT", "START_EXFIL", "ANALYZE_PCAP", "VERIFY_SIGNATURE",
+    ALLOWED = {"PING", "START_ENCRYPT", "START_EXFIL", "ANALYZE_PCAP", "GENERATE_SIGNATURE", "VERIFY_SIGNATURE",
                "VERIFY_DATASET", "RUN_BACKUP", "RESTORE_TRIAL", "FULL_LAB_SEQUENCE"}
 
     def __init__(self, capture=None):
@@ -57,7 +57,7 @@ class ActionController:
                 raise RuntimeError("An action is already running")
             self.state = {"status": "running", "command": command,
                           "detail": "Running full lab sequence" if command == "FULL_LAB_SEQUENCE"
-                          else "Running local analysis" if command in {"ANALYZE_PCAP", "VERIFY_SIGNATURE"}
+                          else "Running local analysis" if command in {"ANALYZE_PCAP", "GENERATE_SIGNATURE", "VERIFY_SIGNATURE"}
                           else "Waiting for the victim lab agent", "started": _now(), "steps": []}
         threading.Thread(target=self._run, args=(command,), daemon=True).start()
         return self.status()
@@ -70,6 +70,8 @@ class ActionController:
                 detail = self._analyze()
             elif command == "VERIFY_SIGNATURE":
                 detail = self._verify_signature()
+            elif command == "GENERATE_SIGNATURE":
+                detail = self._generate_signature()
             else:
                 detail = self._remote(command)
             status = "completed"
@@ -156,14 +158,37 @@ class ActionController:
         source = _json_file(newest, {}).get("source")
         if not isinstance(source, str) or not source.startswith("results/defense_evaluation_"):
             raise ValueError("Signature record does not identify a synthetic evaluation")
+        from tests.signature_demo import verify_artifact
         started = time.perf_counter_ns()
-        result = subprocess.run([sys.executable, "-m", "tests.signature_demo", "--verify", source],
-                                cwd=ROOT, capture_output=True, text=True, timeout=20)
-        _append_dashboard_timing("signature_verify_file", round((time.perf_counter_ns()-started)/1e6, 3),
-                                 result.returncode == 0)
-        if result.returncode:
-            raise RuntimeError((result.stderr or result.stdout)[-180:])
+        successful = False
+        try:
+            verify_artifact(ROOT / source, signature_path=newest)
+            successful = True
+        finally:
+            _append_dashboard_timing("signature_verify_file", round((time.perf_counter_ns()-started)/1e6, 3),
+                                     successful)
         return f"Verified RSA-PSS signature for {Path(source).name}"
+
+    def _generate_signature(self):
+        """Sign only the latest synthetic ten-pair evaluation on Kali."""
+        from tests.signature_demo import sign_artifact, verify_artifact
+        sources = [p for p in (ROOT / "results").glob("defense_evaluation_*.json")
+                   if p.is_file() and not p.is_symlink()]
+        if not sources:
+            raise FileNotFoundError("No synthetic defense evaluation to sign")
+        source = max(sources, key=lambda p: p.stat().st_mtime_ns)
+        destination = ROOT / "results" / "signatures" / (
+            source.stem + "-signed-" + str(time.time_ns()) + ".json.sig.json")
+        started = time.perf_counter_ns()
+        successful = False
+        try:
+            path, record = sign_artifact(source, destination=destination)
+            verify_artifact(source, signature_path=path)
+            successful = True
+        finally:
+            _append_dashboard_timing("signature_generate_file", round((time.perf_counter_ns()-started)/1e6, 3),
+                                     successful)
+        return f"Generated and verified {path.name}; SHA-256 {record['sha256']}"
 
     def _remote(self, command):
         started = time.perf_counter_ns()
@@ -270,37 +295,39 @@ def _append_dashboard_timing(operation, duration_ms, successful):
         output.write(json.dumps(row, sort_keys=True) + "\n")
 
 
-def _performance_data(evaluation, crypto, text_result, image_result, audio_result, signature, hash_result):
+def _performance_data(evaluation, crypto, text_result, image_result, audio_result, signature, hash_result,
+                      crypto_stamp=None):
     """Expose observed measurements with source, units, and sample counts."""
     rows = []
 
-    def add(group, label, value, unit, source, count=None):
+    def add(group, label, value, unit, source, count=None, stamp=None):
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
             rows.append({"group": group, "label": label, "value": round(float(value), 6),
-                         "unit": unit, "source": source, "samples": count})
+                         "unit": unit, "source": source, "samples": count, "observed_utc": stamp})
 
     for label, result, group in (("Text", text_result, "Encryption / decryption"),
                                   ("RGB pixels", image_result, "Encryption / decryption"),
                                   ("MP3", audio_result, "Encryption / decryption")):
         timings = result.get("timings_ms_median") or {}
         for name in ("encrypt", "decrypt"):
-            add(group, label + " " + name, timings.get(name), "ms", "sample AES median", 10)
+            add(group, label + " " + name, timings.get(name), "ms", "sample AES median", 10,
+                result.get("generated_utc"))
     for kind, result in crypto.items():
         if not isinstance(result, dict):
             continue
         for name in ("encrypt", "decrypt"):
             add("File-level AES", kind.title() + " " + name,
-                result.get("aes_" + name + "_median_ms"), "ms", "file benchmark", 10)
+                result.get("aes_" + name + "_median_ms"), "ms", "file benchmark", 10, crypto_stamp)
             add("AES throughput", kind.title() + " " + name,
-                result.get("aes_" + name + "_mib_per_s"), "MiB/s", "file benchmark", 10)
+                result.get("aes_" + name + "_mib_per_s"), "MiB/s", "file benchmark", 10, crypto_stamp)
         add("Key operations", kind.title() + " RSA wrap", result.get("rsa_wrap_median_ms"),
-            "ms", "file benchmark", 10)
+            "ms", "file benchmark", 10, crypto_stamp)
     add("Hashing", "SHA-256 digest", hash_result.get("generation_time_ms_median"),
-        "ms", "synthetic mission brief", hash_result.get("generation_trials"))
+        "ms", "synthetic mission brief", hash_result.get("generation_trials"), hash_result.get("generated_utc"))
     for key, label in (("sha256", "Artifact hash"), ("sign", "RSA-PSS sign"),
                        ("verify", "RSA-PSS verify")):
         add("Signature", label, (signature.get("timings_ms_median") or {}).get(key),
-            "ms", "signed evaluation", signature.get("trials"))
+            "ms", "signed evaluation", signature.get("trials"), signature.get("generated_utc"))
     runs = evaluation.get("runs") or []
     for key, label in (("alert_to_stop_ms", "Honeypot alert to stop"),
                        ("kill_response_ms", "Containment kill response")):
@@ -308,12 +335,12 @@ def _performance_data(evaluation, crypto, text_result, image_result, audio_resul
                   isinstance(run.get(key), (float, int))]
         if values:
             add("Honeypot / containment", label, statistics.median(values),
-                "ms", "monitored paired trials", len(values))
+                "ms", "monitored paired trials", len(values), evaluation.get("generated_utc"))
     unmonitored = [run.get("elapsed_s") for run in runs if run.get("mode") == "without" and
                    isinstance(run.get("elapsed_s"), (int, float))]
     if unmonitored:
         add("Ransomware trial", "Copy-only lock trial", statistics.median(unmonitored)*1000,
-            "ms", "unmonitored complete trials", len(unmonitored))
+            "ms", "unmonitored complete trials", len(unmonitored), evaluation.get("generated_utc"))
     locked_files = [e for e in _events("simulator.log")
                     if e.get("event") == "synthetic_file_encrypted"]
     for key, label in (("encrypt_ms", "Per-file AES lock"),
@@ -322,26 +349,46 @@ def _performance_data(evaluation, crypto, text_result, image_result, audio_resul
         values = [e[key] for e in locked_files if isinstance(e.get(key), (int, float))]
         if values:
             add("Ransomware trial", label, statistics.median(values),
-                "ms", "synthetic file log", len(values))
-    sent = [e.get("elapsed_s") for e in _events("transfer.log") if e.get("event") == "file_sent"
-            and isinstance(e.get("elapsed_s"), (int, float))]
+                "ms", "synthetic file log", len(values), locked_files[-1].get("ts"))
+    sent_events = [e for e in _events("transfer.log") if e.get("event") == "file_sent"
+                   and isinstance(e.get("elapsed_s"), (int, float))]
+    sent = [e["elapsed_s"] for e in sent_events]
     if sent:
         add("Transfer", "Encrypted file transfer", statistics.median(sent)*1000,
-            "ms", "victim transfer log", len(sent))
+            "ms", "victim transfer log", len(sent), sent_events[-1].get("ts"))
+    for event_type, source_name, names in (
+        ("file_sent", "victim transfer log", (("encrypt", "Transfer AES encrypt"),
+                                                   ("hash_plaintext", "Transfer plaintext hash"),
+                                                   ("hash_ciphertext", "Transfer ciphertext hash"),
+                                                   ("wrap_key", "Transfer RSA wrap"))),
+        ("file_received", "Kali receiver log", (("verify_authentication", "Transfer HMAC verification"),
+                                                   ("decrypt", "Transfer AES decrypt"),
+                                                   ("hash_recovered", "Transfer recovered hash"),
+                                                   ("unwrap_key", "Transfer RSA unwrap")))):
+        events = [e for e in _events("transfer.log") if e.get("event") == event_type]
+        for operation, label in names:
+            matched = [sample for e in events for sample in e.get("operations", [])
+                       if sample.get("operation") == operation and
+                       isinstance(sample.get("duration_ms"), (int, float))]
+            if matched:
+                add("Transfer stages", label, statistics.median(s["duration_ms"] for s in matched),
+                    "ms", source_name, len(matched), matched[-1].get("ts"))
     timings = _events("dashboard_timing.log")
     for op, label, group in (("analysis.pcap_parser", "PCAP parse", "Forensics"),
                              ("analysis.forensic_report", "Report generation", "Forensics"),
+                             ("signature_generate_file", "Artifact signing action", "Signature"),
                              ("signature_verify_file", "Artifact verification", "Signature"),
                              ("c2_start_encrypt", "C2 contained trial round trip", "C2 workflow"),
                              ("c2_start_exfil", "C2 transfer round trip", "C2 workflow"),
                              ("c2_run_backup", "TLS backup round trip", "Backup / recovery"),
                              ("c2_restore_trial", "Isolated restore round trip", "Backup / recovery"),
                              ("c2_verify_dataset", "Dataset verification round trip", "Integrity")):
-        values = [e.get("duration_ms") for e in timings
-                  if e.get("operation") == op and e.get("successful") is True and
-                  isinstance(e.get("duration_ms"), (int, float))]
+        matched = [e for e in timings if e.get("operation") == op and e.get("successful") is True and
+                   isinstance(e.get("duration_ms"), (int, float))]
+        values = [e["duration_ms"] for e in matched]
         if values:
-            add(group, label, statistics.median(values), "ms", "Kali dashboard wall time", len(values))
+            add(group, label, statistics.median(values), "ms", "Kali dashboard wall time", len(values),
+                matched[-1].get("ts"))
     return rows
 
 
@@ -412,22 +459,49 @@ def _security_data():
                   if p.is_file() and not p.is_symlink()]
     signature = _json_file(max(signatures, key=lambda p: p.stat().st_mtime_ns), {}) if signatures else {}
     crypto = _json_file(results / "crypto_benchmarks.json", {})
+    def evidence_stamp(record, path):
+        if record.get("generated_utc"):
+            return record["generated_utc"], "Result record"
+        if path is not None and path.is_file() and not path.is_symlink():
+            return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(), "File modified time (legacy result)"
+        return None, "Unavailable"
+    text_stamp, text_basis = evidence_stamp(text_result, results / "text_security.json")
+    hash_stamp, hash_basis = evidence_stamp(hash_result, results / "hash_security.json")
+    image_stamp, image_basis = evidence_stamp(image_result, image_dir / "metrics.json" if image_dir else None)
+    audio_stamp, audio_basis = evidence_stamp(audio_result, audio_dir / "metrics.json" if audio_dir else None)
+    sig_path = max(signatures, key=lambda p: p.stat().st_mtime_ns) if signatures else None
+    sig_stamp, sig_basis = evidence_stamp(signature, sig_path)
+    signature_audit = [e for e in _events("dashboard_timing.log") if e.get("operation") in
+                       {"signature_generate_file", "signature_verify_file"}][-12:]
     return {
         "text": {key: text_result.get(key) for key in
                  ("plaintext", "ciphertext_base64", "recovered_plaintext", "timings_ms_median",
                   "diffusion_one_plaintext_bit", "confusion_one_key_bit", "algorithm",
-                  "iv_base64", "plaintext_bytes", "ciphertext_bytes", "metric_definition")},
+                  "iv_base64", "plaintext_bytes", "ciphertext_bytes", "metric_definition",
+                  "source_sha256", "ciphertext_sha256", "recovered_sha256", "operations")}
+                | {"evidence_utc": text_stamp, "timestamp_basis": text_basis},
         "hash": {key: hash_result.get(key) for key in
                  ("digest_hex", "generation_time_ms_median",
                   "one_input_bit_digest_change_pct_median", "digest_changed_bits_each_trial",
-                  "generation_trials", "source_bytes", "bounded_search", "definitions", "limit")},
+                  "generation_trials", "source_bytes", "bounded_search", "definitions", "limit", "operations")}
+                | {"evidence_utc": hash_stamp, "timestamp_basis": hash_basis},
         "image": {"metrics": image_result.get("metrics"),
                   "timings_ms_median": image_result.get("timings_ms_median"),
+                  "source_sha256": image_result.get("source_sha256"),
+                  "rgb_sha256": image_result.get("rgb_sha256"),
+                  "ciphertext_sha256": image_result.get("ciphertext_sha256"),
+                  "recovered_sha256": image_result.get("recovered_sha256"),
+                  "operations": image_result.get("operations"),
+                  "evidence_utc": image_stamp, "timestamp_basis": image_basis,
                   "previews_available": image_dir is not None and all(
                       (image_dir / filename).is_file() and not (image_dir / filename).is_symlink()
                       for filename in ("original.png", "encrypted_pixels.png", "recovered.png"))},
         "audio": {"source_bytes": audio_result.get("source_bytes"),
                   "sha256": audio_result.get("sha256"),
+                  "ciphertext_sha256": audio_result.get("ciphertext_sha256"),
+                  "recovered_sha256": audio_result.get("recovered_sha256"),
+                  "operations": audio_result.get("operations"),
+                  "evidence_utc": audio_stamp, "timestamp_basis": audio_basis,
                   "ciphertext_prefix_base64": audio_result.get("ciphertext_prefix_base64"),
                   "timings_ms_median": audio_result.get("timings_ms_median"),
                   "recovered_matches_baseline": audio_result.get("recovered_matches_baseline"),
@@ -438,11 +512,18 @@ def _security_data():
                        "runs": evaluation.get("runs", [])[:40]},
         "signature": {key: signature.get(key) for key in
                       ("algorithm", "source", "source_bytes", "sha256", "signature_base64",
-                       "public_key_sha256", "timings_ms_median", "tampered_byte_rejected", "trials")},
+                       "public_key_sha256", "timings_ms_median", "tampered_byte_rejected", "trials", "operations")}
+                     | {"evidence_utc": sig_stamp, "timestamp_basis": sig_basis,
+                        "audit": signature_audit},
         "crypto": crypto.get("measurements", {}),
+        "crypto_operations": crypto.get("operations", []),
+        "transfer_events": [e for e in _events("transfer.log") if e.get("event") in
+                            {"file_sent", "file_received"}][-8:],
+        "lock_events": [e for e in _events("simulator.log") if e.get("event") ==
+                        "synthetic_file_encrypted"][-12:],
         "performance": _performance_data(evaluation, crypto.get("measurements", {}),
                                           text_result, image_result, audio_result,
-                                          signature, hash_result),
+                                          signature, hash_result, crypto.get("ts")),
     }
 
 
@@ -570,12 +651,17 @@ def _attacker():
     remote_events = [] if not remote else [
         {**event, "module": "victim / " + str(event.get("module", ""))}
         for event in remote.get("events", []) if isinstance(event, dict)]
-    security = remote.get("security") if remote else _security_data()
+    local_security = _security_data()
+    security = remote.get("security") if remote else local_security
     security = dict(security or {})
-    local_performance = [row for row in _security_data().get("performance", [])
-                         if row.get("source") == "Kali dashboard wall time"]
+    if local_security.get("signature", {}).get("sha256"):
+        security["signature"] = local_security["signature"]
+    security["transfer_events"] = (security.get("transfer_events") or [])[-4:] + [
+        e for e in local_security.get("transfer_events", []) if e.get("event") == "file_received"][-4:]
+    local_performance = [row for row in local_security.get("performance", [])
+                         if row.get("source") in {"Kali dashboard wall time", "signed evaluation", "Kali receiver log"}]
     security["performance"] = [row for row in security.get("performance", [])
-                               if row.get("source") != "Kali dashboard wall time"] + local_performance
+                               if row.get("source") not in {"Kali dashboard wall time", "signed evaluation", "Kali receiver log"}] + local_performance
     return {
         "role": "attacker", "title": "Attacker Activity", "updated": _now(),
         "cards": [
@@ -646,6 +732,7 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 <button class="action-button" data-action="START_ENCRYPT">Run contained trial</button>
 <button class="action-button" data-action="START_EXFIL">Transfer synthetic PDF</button>
 <button class="action-button" data-action="ANALYZE_PCAP">Analyze latest PCAP</button>
+<button class="action-button" data-action="GENERATE_SIGNATURE">Generate evaluation signature</button>
 <button class="action-button" data-action="VERIFY_SIGNATURE">Verify evaluation signature</button></div>
 <h3>Victim defense workflows</h3><p class="muted">These signed requests verify the synthetic baseline, create a verified TLS backup, or restore only into an isolated trial directory.</p>
 <div class="action-buttons"><button class="action-button" data-action="VERIFY_DATASET">Verify dataset</button>
@@ -665,7 +752,7 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 <div class="tab-view" id="tab-defense" hidden><section class="panel"><h2>Containment evaluation</h2><div id="security-defense"></div></section></div>
 <div class="tab-view" id="tab-performance" hidden><section class="panel"><h2>Performance analysis</h2><div id="security-performance"></div></section></div>
 <div class="tab-view" id="tab-hash" hidden><section class="panel"><h2>SHA-256 security and performance</h2><div id="security-hash"></div></section></div>
-<div class="tab-view" id="tab-signature" hidden><section class="panel"><h2>Digital signature generation and verification</h2><div id="security-signature"></div></section></div>
+<div class="tab-view" id="tab-signature" hidden><section class="panel"><h2>Digital signature generation and verification</h2><div id="signature-controls" hidden><p class="muted">Signs only the latest synthetic defense evaluation with Kali's protected private signing key. Verification uses its public key.</p><div class="action-buttons"><button class="action-button" data-action="GENERATE_SIGNATURE">Generate signature</button><button class="action-button" data-action="VERIFY_SIGNATURE">Verify signature</button></div><div class="action-status" id="signature-status" role="status">No signature action run yet.</div></div><div id="security-signature"></div></section></div>
 <div class="tab-view" id="tab-reports" hidden><section class="panel"><h2>Generated reports</h2><div id="reports"></div></section></div>
 <div class="tab-view" id="tab-events" hidden><section class="panel"><h2>Recorded events</h2><div class="scroll"><table><thead><tr><th>Time (UTC)</th><th>Module</th><th>Event</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table></div></section></div>
 </div></div></main><script>
@@ -727,6 +814,23 @@ function chartGrid(parent){const grid=el('div','chart-grid');parent.append(grid)
 function process(parent,title,detail){const box=el('div','process');box.append(el('strong','',title),el('div','muted',detail));parent.append(box)}
 function table(parent,headers,rows){const wrap=el('div','table-wrap'),t=el('table',''),thead=el('thead',''),head=el('tr','');headers.forEach(h=>head.append(el('th','',h)));thead.append(head);const body=el('tbody','');rows.forEach(row=>{const tr=el('tr','');row.forEach(value=>tr.append(el('td','',value??'—')));body.append(tr)});t.append(thead,body);wrap.append(t);parent.append(wrap)}
 const number=(value,digits=3)=>value!==null&&value!==undefined&&value!==''&&Number.isFinite(Number(value))?Number(value).toFixed(digits):'Not recorded';
+function evidenceHeader(parent,record){
+  const at=record.evidence_utc||'Not recorded',basis=record.timestamp_basis||'Unavailable';
+  parent.append(el('p','measure-note','Evidence recorded: '+at+' UTC · '+basis+'. Timings below are measured durations; this timestamp identifies the saved result.'));
+}
+function timingBlock(parent,title,timings,labels){
+  if(!timings)return;
+  const rows=labels.filter(([key])=>typeof timings[key]==='number');
+  if(!rows.length)return;
+  const grid=chartGrid(parent);chart(grid,title,[{name:'Median milliseconds',values:rows.map(([key])=>timings[key])}],
+    {unit:'ms',labels:rows.map(([,name])=>name),note:'Median duration across the recorded sample trials.'});
+  table(parent,['Operation','Median duration (ms)'],rows.map(([key,name])=>[name,number(timings[key],6)]));
+}
+function operationDetails(parent,records){
+  if(!Array.isArray(records)||!records.length){parent.append(el('p','measure-note','Individual operation timestamps were not stored in this older result. Regenerate this synthetic analysis to populate them.'));return}
+  const details=el('details','');details.append(el('summary','',`${records.length} timestamped operations · inspect individual trials`));
+  table(details,['Started (UTC)','Operation','Duration (ms)'],records.map(r=>[r.ts||'—',r.operation||'—',number(r.duration_ms,6)]));parent.append(details);
+}
 function renderReports(items){
   const root=$('reports');root.replaceChildren();
   if(!items.length){root.append(el('p','muted','No generated report is available on this VM.'));return}
@@ -750,10 +854,16 @@ function drawSecurity(data){
   for(const node of Object.values(root))node.replaceChildren();
   if(text.plaintext){
     const box=root.text;
+    evidenceHeader(box,text);
     box.append(el('p','insight',`${text.algorithm||'AES'} · ${text.plaintext_bytes||'?'} plaintext bytes → ${text.ciphertext_bytes||'?'} ciphertext bytes · one synthetic sample. The IV is displayed for inspection; the ephemeral key is never stored.`));
     for(const [label,value] of [['Plaintext',text.plaintext],['IV (Base64)',text.iv_base64],['Ciphertext (Base64)',text.ciphertext_base64],['Recovered plaintext',text.recovered_plaintext]]){
       box.append(el('div','label',label),el('pre','',value||'Not recorded'));
     }
+    table(box,['Stage','SHA-256 digest'],[['Plaintext',text.source_sha256||'Not recorded in legacy result'],
+      ['Ciphertext bytes',text.ciphertext_sha256||'Not recorded in legacy result'],
+      ['Recovered plaintext',text.recovered_sha256||'Not recorded in legacy result']]);
+    metricRow(box,'Recovery hash check',text.source_sha256&&text.recovered_sha256?
+      (text.source_sha256===text.recovered_sha256?'Identical':'Mismatch'):'Round-trip checked by generator; digest details absent in legacy result');
     try{
       const plain=Array.from(new TextEncoder().encode(text.plaintext)),cipher=Array.from(Uint8Array.from(atob(text.ciphertext_base64),c=>c.charCodeAt(0)));
       const lines=chartGrid(box),count=Math.min(32,plain.length,cipher.length);
@@ -765,6 +875,8 @@ function drawSecurity(data){
         {name:'Plaintext',values:hist(plain),color:'#49c9ad'},
         {name:'Ciphertext',values:hist(cipher),color:'#ffad83'}],{unit:'bytes',labels:Array.from({length:bins},(_,i)=>`${i*16}–${i*16+15}`),note:'Counts depend on sample length. This is a visualization, not a randomness test.'});
     }catch(error){box.append(el('p','muted','Byte charts unavailable: '+error.message))}
+    timingBlock(box,'Text AES performance',text.timings_ms_median,[['encrypt','Encrypt'],['decrypt','Decrypt']]);
+    operationDetails(box,text.operations);
   }else root.text.append(el('p','muted','Text evidence has not been generated on this VM.'));
   for(const [name,source,kind] of [
     ['avalanche',text.diffusion_one_plaintext_bit,'plaintext'],
@@ -783,10 +895,24 @@ function drawSecurity(data){
     chart(grid,'One-bit trials: hex digit changes',[
       {name:'Measured',values:trials.map(t=>t.hex_character_change_pct)}],{kind:'bar',unit:'%',note:'Hex representation; 100% is an illustrative target, not a guarantee.'});
     table(box,['Trial','Changed ciphertext bits (%)','Changed ciphertext hex digits (%)'],trials.map((t,i)=>[i+1,number(t.bit_change_pct),number(t.hex_character_change_pct)]));
+    evidenceHeader(box,text);
+    timingBlock(box,kind==='plaintext'?'One-bit plaintext variant encryption':'One-bit key variant encryption',
+      source.timings_ms_median,[['encrypt','Variant encrypt']]);
+    operationDetails(box,(text.operations||[]).filter(r=>r.operation===
+      (kind==='plaintext'?'encrypt_plaintext_bit_variant':'encrypt_key_bit_variant')));
+    box.append(el('p','measure-note','General text encryption and decryption timing is also shown in the Plaintext & ciphertext tab.'));
     box.append(el('p','measure-note',text.metric_definition||'Each controlled trial changes one input bit. Sample values do not prove a general cryptographic guarantee.'));
   }
   if(im.metrics){
-    const box=root.image,m=im.metrics,grid=chartGrid(box);
+    const box=root.image,m=im.metrics; evidenceHeader(box,im);
+    box.append(el('p','insight','JPEG input → decoded RGB pixels → AES ciphertext bytes displayed as RGB pixels → decrypted RGB pixels. The recovered pixels match the decoded input.'));
+    table(box,['Image stage','SHA-256 digest'],[['Source JPEG',im.source_sha256||'Not recorded'],
+      ['Decoded RGB',im.rgb_sha256||'Not recorded in legacy result'],
+      ['Full AES ciphertext',im.ciphertext_sha256||'Not recorded in legacy result'],
+      ['Recovered RGB',im.recovered_sha256||'Not recorded in legacy result']]);
+    metricRow(box,'RGB recovery check',im.rgb_sha256&&im.recovered_sha256?
+      (im.rgb_sha256===im.recovered_sha256?'Identical':'Mismatch'):'Verified by generator; separate digests absent in legacy result');
+    const grid=chartGrid(box);
     chart(grid,'RGB pixel encryption metrics',[
       {name:'Measured %',values:[m.npcr_ciphertexts_one_plaintext_bit_pct,m.uaci_ciphertexts_one_plaintext_bit_pct]}],
       {unit:'%',labels:['NPCR','UACI'],note:'Compare two ciphertext pixel views after one plaintext-bit change.'});
@@ -798,6 +924,8 @@ function drawSecurity(data){
       ['Original → encrypted MSE',number(m.mse_original_to_encrypted)],['Original → encrypted PSNR',String(m.psnr_original_to_encrypted_db)+' dB'],
       ['Original → recovered MSE',number(m.mse_original_to_recovered)],['Original → recovered PSNR',String(m.psnr_original_to_recovered_db)+' dB']]);
     box.append(el('p','measure-note','Ciphertext bytes are mapped to RGB pixels for display. This pixel view is not a decodable JPEG.'));
+    timingBlock(box,'RGB AES performance',im.timings_ms_median,[['encrypt','Encrypt'],['decrypt','Decrypt']]);
+    operationDetails(box,im.operations);
     if(data.role==='victim'&&im.previews_available){
       const gallery=el('div','previews');for(const [name,label] of [['original','Original RGB'],['encrypted','Ciphertext pixels'],['recovered','Recovered RGB']]){
         const figure=el('figure',''),picture=el('img','');picture.src='/api/security-image/'+name;picture.alt=label;
@@ -806,10 +934,15 @@ function drawSecurity(data){
     }
   }else root.image.append(el('p','muted','Image measurements unavailable.'));
   if(audio.sha256){
-    const box=root.audio;box.append(el('p','insight','Conventional AES encryption of synthetic MP3 bytes; the encrypted bytes cannot be played as audio. The recovered sample is checked against the committed SHA-256 baseline.'));
+    const box=root.audio;evidenceHeader(box,audio);box.append(el('p','insight','Synthetic MP3 → AES encrypted bytes → decrypted MP3. Ciphertext is not playable; recovered audio is checked against the committed SHA-256 baseline.'));
     metricRow(box,'Original MP3 bytes',audio.source_bytes);metricRow(box,'Recovered SHA-256',audio.sha256);
     metricRow(box,'Recovered matches baseline',audio.recovered_matches_baseline?'Yes':'Not confirmed');
     box.append(el('div','label','Ciphertext prefix (Base64)'),el('pre','',audio.ciphertext_prefix_base64||''));
+    table(box,['Audio stage','SHA-256 digest'],[['Original MP3',audio.sha256],
+      ['Ciphertext bytes',audio.ciphertext_sha256||'Not recorded in legacy result'],
+      ['Recovered MP3',audio.recovered_sha256||'Not recorded in legacy result']]);
+    timingBlock(box,'MP3 AES performance',audio.timings_ms_median,[['encrypt','Encrypt'],['decrypt','Decrypt']]);
+    operationDetails(box,audio.operations);
     if(data.role==='victim'&&audio.playback_available)for(const [name,label] of [['original','Original synthetic MP3'],['recovered','Recovered synthetic MP3']]){
       box.append(el('div','label',label));const player=el('audio','');player.controls=true;player.preload='none';player.src='/api/security-audio/'+name;box.append(player);
     }
@@ -834,9 +967,21 @@ function drawSecurity(data){
   }else root.defense.append(el('p','muted','Paired defense evaluation unavailable.'));
   const hp=root.honeypot;hp.append(el('p','insight','1. Synthetic lock copy → 2. Decoy file event → 3. Registered simulator PID stopped → 4. Verify original baseline → 5. Recover and report. The standalone watcher records file events and cannot infer a PID from an event alone.'));
   if(ev.summary){metricRow(hp,'Trial pairs',ev.pairs);metricRow(hp,'Median alert-to-stop',number(ev.summary.alert_to_stop_ms_median)+' ms');metricRow(hp,'Median real copies with monitoring',ev.summary.with_real_copies_median);metricRow(hp,'Median real copies without monitoring',ev.summary.without_real_copies_median)}
+  const locks=(sec.lock_events||[]).slice(-5).reverse();if(locks.length){hp.append(el('h3','','Recent synthetic locked-copy operations'));
+    table(hp,['Logged (UTC)','Synthetic file','AES started / ms','Key wrap started / ms','Copy write started / ms','Original SHA-256'],
+      locks.map(e=>[e.ts,e.file,e.encrypt_utc?e.encrypt_utc+' · '+number(e.encrypt_ms,6):'Not recorded',
+        e.wrap_utc?e.wrap_utc+' · '+number(e.wrap_ms,6):'Not recorded',
+        e.write_utc?e.write_utc+' · '+number(e.write_ms,6):'Not recorded',e.sha256_original]));}
+  const transfers=(sec.transfer_events||[]).slice(-4).reverse();if(transfers.length){hp.append(el('h3','','Encrypted transfer and recovery evidence'));
+    for(const event of transfers){const item=el('div','process');item.append(el('strong','',
+      `${event.event==='file_sent'?'Victim sent':'Kali recovered'} · ${event.file||'sample'} · ${event.ts||'Time unavailable'} UTC`));
+      metricRow(item,'Original / recovered SHA-256',event.sha256||'Not recorded');
+      metricRow(item,'Ciphertext SHA-256',event.ciphertext_sha256||'Not recorded in legacy event');
+      metricRow(item,'Transfer elapsed',typeof event.elapsed_s==='number'?number(event.elapsed_s*1000,3)+' ms':'Not recorded');
+      operationDetails(item,event.operations);hp.append(item);}}
   hp.append(el('p','measure-note','The button below runs fixed, signed actions only. It requires the Ubuntu victim dashboard and armed C2 agent. Historical evaluation results remain available under Defense.'));
   if(hash.digest_hex){
-    const box=root.hash;box.append(el('div','label','SHA-256 digest of synthetic mission brief'),el('pre','signature-value',hash.digest_hex));
+    const box=root.hash;evidenceHeader(box,hash);box.append(el('div','label','SHA-256 digest of synthetic mission brief'),el('pre','signature-value',hash.digest_hex));
     metricRow(box,'Input length',hash.source_bytes+' bytes');metricRow(box,'Median generation time',number(hash.generation_time_ms_median,6)+' ms across '+hash.generation_trials+' trials');
     metricRow(box,'One-bit input change: median digest bits changed',number(hash.one_input_bit_digest_change_pct_median)+'%');
     const grid=chartGrid(box);chart(grid,'Digest generation time',[{name:'Median',values:[hash.generation_time_ms_median]}],{unit:'ms',labels:['SHA-256'],note:'The timing chart has one median from repeated trials, not a time series.'});
@@ -850,9 +995,10 @@ function drawSecurity(data){
       ['Second pre-image',defs.second_preimage_resistance,search.second_preimage_found?'Match found':'No match'],
       ['Collision',defs.collision_resistance,search.collision_found?'Match found':'No match']]);
     box.append(el('p','measure-note',`${search.candidates||0} candidates tested. ${hash.limit||'A bounded search cannot prove resistance.'}`));
+    operationDetails(box,hash.operations);
   }else root.hash.append(el('p','muted','Hash security evidence unavailable.'));
   if(sig.sha256){
-    const box=root.signature;box.append(el('p','insight',`${sig.algorithm||'RSA-PSS-SHA256'} signs the evaluation artifact on Kali. The public key verifies it on either VM; a one-byte change was ${sig.tampered_byte_rejected?'rejected':'not confirmed as rejected'}.`));
+    const box=root.signature;evidenceHeader(box,sig);box.append(el('p','insight',`${sig.algorithm||'RSA-PSS-SHA256'} signs the evaluation artifact on Kali. The public key verifies it on either VM; a one-byte change was ${sig.tampered_byte_rejected?'rejected':'not confirmed as rejected'}.`));
     for(const [label,value] of [['Signed artifact',sig.source],['Artifact SHA-256',sig.sha256],['Public key fingerprint (SHA-256)',sig.public_key_sha256],['Stored signature (Base64)',sig.signature_base64]]){
       box.append(el('div','label',label),el('pre','signature-value',value||'Not recorded'));
     }
@@ -861,7 +1007,11 @@ function drawSecurity(data){
       {name:'Milliseconds',values:[timing.sha256,timing.sign,timing.verify]}],
       {unit:'ms',labels:['Hash','Sign','Verify'],note:`${sig.trials||'?'} trials · signed artifact ${sig.source_bytes||'?'} bytes`});
     table(box,['Step','Result'],[['Generate SHA-256',number(timing.sha256,6)+' ms'],['RSA-PSS sign',number(timing.sign,6)+' ms'],['Verify signature',number(timing.verify,6)+' ms'],['One-byte tamper test',sig.tampered_byte_rejected?'Rejected':'Not confirmed']]);
-    box.append(el('p','measure-note','A displayed signature record is evidence of an earlier run. Use the attacker control to independently verify the artifact again.'));
+    operationDetails(box,sig.operations);
+    if(Array.isArray(sig.audit)&&sig.audit.length){box.append(el('h3','','Dashboard signing and verification actions'));
+      table(box,['Time (UTC)','Action','Wall time (ms)','Outcome'],sig.audit.slice().reverse().map(e=>[
+        e.ts,e.operation==='signature_generate_file'?'Generate signature':'Verify signature',number(e.duration_ms,3),e.successful?'PASS':'FAILED']));}
+    box.append(el('p','measure-note','The stored signature reflects the selected signed evaluation. Kali actions independently generate a new record and verify the latest record.'));
   }else root.signature.append(el('p','muted','Signed evaluation record unavailable.'));
   const performance=root.performance;
   performance.append(el('p','insight','Charts show actual recorded medians in their own units and groups. AES sample timings, paired-trial timings, and dashboard wall times have different scopes; compare like with like.'));
@@ -872,12 +1022,19 @@ function drawSecurity(data){
         unit,labels:unitRows.map(r=>r.label),note:unitRows.map(r=>r.source).filter((v,i,a)=>a.indexOf(v)===i).join(' / ')+' · hover bars for exact values.'});
     }
   }
-  table(performance,['Process','Median','Unit','Source / scope','Samples'],perf.map(r=>[r.label,number(r.value,6),r.unit,r.source,r.samples??'—']));
+  table(performance,['Process','Median','Unit','Source / scope','Samples','Evidence time (UTC)'],
+    perf.map(r=>[r.label,number(r.value,6),r.unit,r.source,r.samples??'—',r.observed_utc||'Not recorded in legacy result']));
+  if(Array.isArray(sec.crypto_operations)&&sec.crypto_operations.length){performance.append(el('h3','','Individual file benchmark samples'));
+    table(performance,['Started (UTC)','File type','Operation','Duration (ms)'],
+      sec.crypto_operations.map(r=>[r.ts,r.kind,r.operation,number(r.duration_ms,6)]));}
+  else performance.append(el('p','measure-note','Individual file benchmark timestamps require a new crypto benchmark run; legacy results contain only medians.'));
   const expected=['Text encrypt','Text decrypt','RGB pixels encrypt','RGB pixels decrypt','MP3 encrypt','MP3 decrypt',
     'Document encrypt','Document decrypt','Image encrypt','Image decrypt','Audio encrypt','Audio decrypt',
-    'Video encrypt','Video decrypt','SHA-256 digest','RSA-PSS sign','RSA-PSS verify',
+    'Video encrypt','Video decrypt','SHA-256 digest','RSA-PSS sign','RSA-PSS verify','Artifact signing action',
     'Copy-only lock trial','Per-file AES lock','Per-file RSA key wrap','Per-file locked copy write',
     'Honeypot alert to stop','Containment kill response','Encrypted file transfer',
+    'Transfer AES encrypt','Transfer AES decrypt','Transfer plaintext hash','Transfer ciphertext hash',
+    'Transfer recovered hash','Transfer HMAC verification',
     'TLS backup round trip','Isolated restore round trip','PCAP parse','Report generation','Artifact verification'];
   const missing=expected.filter(name=>!perf.some(row=>row.label===name));
   if(missing.length){const box=el('div','');box.append(el('h3','','Stages awaiting recorded measurements'));
@@ -887,7 +1044,7 @@ function drawSecurity(data){
 }
 function draw(data){role=data.role;$('title').textContent=data.title;$('updated').textContent='Updated '+data.updated.replace('T',' ')+' UTC · refreshes every 4 seconds';
 $('mode-pill').textContent=role==='attacker'?'CONTROLLED LAB ACTIONS':'READ ONLY · LAB VM';
-document.querySelector('[data-tab="controls"]').hidden=role!=='attacker';$('demo-control').hidden=role!=='attacker';showTab(activeTab);
+document.querySelector('[data-tab="controls"]').hidden=role!=='attacker';$('demo-control').hidden=role!=='attacker';$('signature-controls').hidden=role!=='attacker';showTab(activeTab);
 const cards=$('cards');cards.replaceChildren();for(const c of data.cards){const box=el('div','card');box.append(el('div','label',c.label),el('div','value',c.value),el('div','note',c.note));cards.append(box)}
 const summary=$('summary');summary.replaceChildren();for(const row of data.summary){const item=el('div','row');item.append(el('span','',row.label),el('span','',row.value));summary.append(item)}
 const visual=$('visual');visual.replaceChildren();
@@ -905,16 +1062,16 @@ async function refreshAction(){
   try{
     const response=await fetch('/api/action/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);
     const state=await response.json();const summary=(state.command||'Lab controls')+' · '+state.status+' · '+state.detail;
-    $('action-status').textContent=summary;$('demo-status').textContent=summary;
+    $('action-status').textContent=summary;$('demo-status').textContent=summary;$('signature-status').textContent=summary;
     fullSequenceRunning=state.command==='FULL_LAB_SEQUENCE'&&state.status==='running';
     const progress=$('sequence-steps');progress.replaceChildren();
     for(const step of state.steps||[]){const item=el('li','',step.name+' · '+step.status+' · '+step.detail+
       (typeof step.duration_ms==='number'?' · '+step.duration_ms.toFixed(3)+' ms':''));item.dataset.status=step.status;progress.append(item)}
     for(const button of document.querySelectorAll('[data-action]'))button.disabled=state.status==='running'||(button.dataset.action==='ANALYZE_PCAP'&&captureRunning);
-    if(['ANALYZE_PCAP','FULL_LAB_SEQUENCE'].includes(state.command)&&state.status==='completed'&&state.finished!==lastReportAction){
+    if(['ANALYZE_PCAP','FULL_LAB_SEQUENCE','GENERATE_SIGNATURE','VERIFY_SIGNATURE'].includes(state.command)&&state.status==='completed'&&state.finished!==lastReportAction){
       lastReportAction=state.finished;selectedReport=null;await refresh();
     }
-  }catch(error){$('action-status').textContent='Action status unavailable: '+error.message;$('demo-status').textContent=$('action-status').textContent}
+  }catch(error){$('action-status').textContent='Action status unavailable: '+error.message;$('demo-status').textContent=$('action-status').textContent;$('signature-status').textContent=$('action-status').textContent}
 }
 let lastReportAction=null;
 let captureRunning=false;
@@ -942,14 +1099,14 @@ for(const button of document.querySelectorAll('[data-capture]'))button.addEventL
   }catch(error){$('capture-status').textContent='Capture action failed: '+error.message;await refreshCapture()}
 });
 for(const button of document.querySelectorAll('[data-action]'))button.addEventListener('click',async()=>{
-  button.disabled=true;$('action-status').textContent='Starting '+button.dataset.action+'…';$('demo-status').textContent=$('action-status').textContent;
+  button.disabled=true;$('action-status').textContent='Starting '+button.dataset.action+'…';$('demo-status').textContent=$('action-status').textContent;$('signature-status').textContent=$('action-status').textContent;
   try{
     const response=await fetch('/api/action/'+button.dataset.action,{
       method:'POST',headers:{'X-ISLab-Action-Token':ACTION_TOKEN}
     });
     const result=await response.json();if(!response.ok)throw Error(result.error||'HTTP '+response.status);
     await refreshAction();
-  }catch(error){$('action-status').textContent='Could not start action: '+error.message;$('demo-status').textContent=$('action-status').textContent;button.disabled=false}
+  }catch(error){$('action-status').textContent='Could not start action: '+error.message;$('demo-status').textContent=$('action-status').textContent;$('signature-status').textContent=$('action-status').textContent;button.disabled=false}
 });
 refresh();refreshAction();refreshCapture();setInterval(refresh,4000);setInterval(refreshAction,2000);setInterval(refreshCapture,2000);
 </script></body></html>'''

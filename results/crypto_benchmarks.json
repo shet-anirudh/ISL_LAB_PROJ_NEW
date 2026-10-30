@@ -1,42 +1,764 @@
 {
   "measurements": {
     "audio": {
-      "aes_decrypt_median_ms": 0.0348,
-      "aes_decrypt_mib_per_s": 2208.905,
-      "aes_encrypt_median_ms": 0.076,
-      "aes_encrypt_mib_per_s": 1012.803,
+      "aes_decrypt_median_ms": 0.0296,
+      "aes_decrypt_mib_per_s": 2599.173,
+      "aes_encrypt_median_ms": 0.0779,
+      "aes_encrypt_mib_per_s": 987.89,
       "bytes": 80685,
       "file": "03_Media/briefing.mp3",
-      "rsa_wrap_median_ms": 0.0661
+      "rsa_wrap_median_ms": 0.0702
     },
     "document": {
       "aes_decrypt_median_ms": 0.0124,
-      "aes_decrypt_mib_per_s": 419.819,
-      "aes_encrypt_median_ms": 0.0202,
-      "aes_encrypt_mib_per_s": 257.208,
+      "aes_decrypt_mib_per_s": 418.482,
+      "aes_encrypt_median_ms": 0.0196,
+      "aes_encrypt_mib_per_s": 265.069,
       "bytes": 5443,
       "file": "01_Operations/report.pdf",
-      "rsa_wrap_median_ms": 0.0713
+      "rsa_wrap_median_ms": 0.0625
     },
     "image": {
-      "aes_decrypt_median_ms": 0.018,
-      "aes_decrypt_mib_per_s": 1914.538,
-      "aes_encrypt_median_ms": 0.0419,
-      "aes_encrypt_mib_per_s": 823.771,
+      "aes_decrypt_median_ms": 0.0189,
+      "aes_decrypt_mib_per_s": 1829.17,
+      "aes_encrypt_median_ms": 0.0422,
+      "aes_encrypt_mib_per_s": 818.859,
       "bytes": 36219,
       "file": "02_Intelligence/marker.jpg",
-      "rsa_wrap_median_ms": 0.0637
+      "rsa_wrap_median_ms": 0.0656
     },
     "video": {
-      "aes_decrypt_median_ms": 0.0124,
-      "aes_decrypt_mib_per_s": 482.123,
-      "aes_encrypt_median_ms": 0.0194,
-      "aes_encrypt_mib_per_s": 306.778,
+      "aes_decrypt_median_ms": 0.0126,
+      "aes_decrypt_mib_per_s": 473.427,
+      "aes_encrypt_median_ms": 0.019,
+      "aes_encrypt_mib_per_s": 314.32,
       "bytes": 6248,
       "file": "03_Media/training.mp4",
-      "rsa_wrap_median_ms": 0.0629
+      "rsa_wrap_median_ms": 0.0622
     }
   },
+  "operations": [
+    {
+      "duration_ms": 0.860925,
+      "kind": "document",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.610+00:00"
+    },
+    {
+      "duration_ms": 0.035699,
+      "kind": "document",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.611+00:00"
+    },
+    {
+      "duration_ms": 0.472102,
+      "kind": "document",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.611+00:00"
+    },
+    {
+      "duration_ms": 0.047568,
+      "kind": "document",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.016697,
+      "kind": "document",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.093056,
+      "kind": "document",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.023542,
+      "kind": "document",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.013323,
+      "kind": "document",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.068443,
+      "kind": "document",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.018667,
+      "kind": "document",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.01234,
+      "kind": "document",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.062691,
+      "kind": "document",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.018277,
+      "kind": "document",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.012368,
+      "kind": "document",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.060609,
+      "kind": "document",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.018143,
+      "kind": "document",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.012241,
+      "kind": "document",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.059667,
+      "kind": "document",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.017503,
+      "kind": "document",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.011909,
+      "kind": "document",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.06197,
+      "kind": "document",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.612+00:00"
+    },
+    {
+      "duration_ms": 0.020499,
+      "kind": "document",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.01244,
+      "kind": "document",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.065182,
+      "kind": "document",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.023117,
+      "kind": "document",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.012616,
+      "kind": "document",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.062287,
+      "kind": "document",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.017983,
+      "kind": "document",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.011987,
+      "kind": "document",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.060997,
+      "kind": "document",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.073804,
+      "kind": "image",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.209752,
+      "kind": "image",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.086245,
+      "kind": "image",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.056332,
+      "kind": "image",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.020199,
+      "kind": "image",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.067267,
+      "kind": "image",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.042267,
+      "kind": "image",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.613+00:00"
+    },
+    {
+      "duration_ms": 0.019086,
+      "kind": "image",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.064434,
+      "kind": "image",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.041928,
+      "kind": "image",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.018592,
+      "kind": "image",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.062712,
+      "kind": "image",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.041254,
+      "kind": "image",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.022377,
+      "kind": "image",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.071179,
+      "kind": "image",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.04318,
+      "kind": "image",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.019089,
+      "kind": "image",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.069664,
+      "kind": "image",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.043243,
+      "kind": "image",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.018678,
+      "kind": "image",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.063212,
+      "kind": "image",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.042097,
+      "kind": "image",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.018659,
+      "kind": "image",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.066798,
+      "kind": "image",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.041236,
+      "kind": "image",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.018172,
+      "kind": "image",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.06235,
+      "kind": "image",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.041024,
+      "kind": "image",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.614+00:00"
+    },
+    {
+      "duration_ms": 0.018681,
+      "kind": "image",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.615+00:00"
+    },
+    {
+      "duration_ms": 0.064412,
+      "kind": "image",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.615+00:00"
+    },
+    {
+      "duration_ms": 0.139594,
+      "kind": "audio",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.615+00:00"
+    },
+    {
+      "duration_ms": 0.20648,
+      "kind": "audio",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.615+00:00"
+    },
+    {
+      "duration_ms": 0.108338,
+      "kind": "audio",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.615+00:00"
+    },
+    {
+      "duration_ms": 0.088229,
+      "kind": "audio",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.615+00:00"
+    },
+    {
+      "duration_ms": 0.053184,
+      "kind": "audio",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.615+00:00"
+    },
+    {
+      "duration_ms": 0.07265,
+      "kind": "audio",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.615+00:00"
+    },
+    {
+      "duration_ms": 0.07803,
+      "kind": "audio",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.615+00:00"
+    },
+    {
+      "duration_ms": 0.031481,
+      "kind": "audio",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.615+00:00"
+    },
+    {
+      "duration_ms": 0.081578,
+      "kind": "audio",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.080956,
+      "kind": "audio",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.040047,
+      "kind": "audio",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.070394,
+      "kind": "audio",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.086812,
+      "kind": "audio",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.031114,
+      "kind": "audio",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.070101,
+      "kind": "audio",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.077751,
+      "kind": "audio",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.027848,
+      "kind": "audio",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.066628,
+      "kind": "audio",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.075865,
+      "kind": "audio",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.028095,
+      "kind": "audio",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.066618,
+      "kind": "audio",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.075725,
+      "kind": "audio",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.027313,
+      "kind": "audio",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.616+00:00"
+    },
+    {
+      "duration_ms": 0.065142,
+      "kind": "audio",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.075228,
+      "kind": "audio",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.027729,
+      "kind": "audio",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.06471,
+      "kind": "audio",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.075536,
+      "kind": "audio",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.027493,
+      "kind": "audio",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.072092,
+      "kind": "audio",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.023763,
+      "kind": "video",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.013424,
+      "kind": "video",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.078994,
+      "kind": "video",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.022604,
+      "kind": "video",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.016515,
+      "kind": "video",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.070564,
+      "kind": "video",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.021709,
+      "kind": "video",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.013707,
+      "kind": "video",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.061384,
+      "kind": "video",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.018574,
+      "kind": "video",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.012621,
+      "kind": "video",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.063115,
+      "kind": "video",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.617+00:00"
+    },
+    {
+      "duration_ms": 0.018824,
+      "kind": "video",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.01247,
+      "kind": "video",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.059886,
+      "kind": "video",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.018374,
+      "kind": "video",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.012507,
+      "kind": "video",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.059803,
+      "kind": "video",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.018689,
+      "kind": "video",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.012247,
+      "kind": "video",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.059281,
+      "kind": "video",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.018539,
+      "kind": "video",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.012551,
+      "kind": "video",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.084873,
+      "kind": "video",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.020577,
+      "kind": "video",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.012773,
+      "kind": "video",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.067155,
+      "kind": "video",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.01909,
+      "kind": "video",
+      "operation": "encrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.012461,
+      "kind": "video",
+      "operation": "decrypt",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    },
+    {
+      "duration_ms": 0.059831,
+      "kind": "video",
+      "operation": "wrap_key",
+      "ts": "2026-10-30T03:49:58.618+00:00"
+    }
+  ],
   "trials_per_file": 10,
-  "ts": "2026-10-29T05:25:05.466+00:00"
+  "ts": "2026-10-30T03:49:58.618+00:00"
 }

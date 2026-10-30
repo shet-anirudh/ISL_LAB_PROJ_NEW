@@ -1,47 +1,265 @@
 {
-  "generated_utc": "2026-10-29T13:17:34.034916+00:00",
+  "generated_utc": "2026-10-30T03:49:56.585967+00:00",
   "algorithm": "AES-256-CBC with PKCS7 padding",
   "source": "01_Operations/mission_brief.txt",
   "plaintext": "SYNTHETIC TRAINING DATA — NOT REAL\nExercise: OP-2824\nLocation: SECTOR-13 (fictional)\nStatus: simulated\n",
-  "ciphertext_base64": "njqM779LujL23Ds560yCiB48u5W1PY8ygK5yeENfy68t5QjVVx593F7DaS4m99sdT/azmBbVam6RkMCTuSj1OVBuGF7IA8HlILLrtaNMM36eEOkZLGuzvDEoaGd8EheYPU9qnLW7HxLVsFFTEGDZAQ==",
-  "iv_base64": "Gi6moz66D54vVUHXPd+nig==",
+  "source_sha256": "7ee7b32fa7e543d5f4c8beb858e04a03a627a690b40821f678424f24741a655d",
+  "ciphertext_sha256": "5c54461a6824913bcc01b34825b8d31e04b2f32678418d2e1dd87055c3bdd4bf",
+  "recovered_sha256": "7ee7b32fa7e543d5f4c8beb858e04a03a627a690b40821f678424f24741a655d",
+  "operations": [
+    {
+      "ts": "2026-10-30T03:49:56.583+00:00",
+      "operation": "hash_plaintext",
+      "duration_ms": 0.027208
+    },
+    {
+      "ts": "2026-10-30T03:49:56.584+00:00",
+      "operation": "encrypt",
+      "duration_ms": 0.910961
+    },
+    {
+      "ts": "2026-10-30T03:49:56.584+00:00",
+      "operation": "hash_ciphertext",
+      "duration_ms": 0.008349
+    },
+    {
+      "ts": "2026-10-30T03:49:56.584+00:00",
+      "operation": "decrypt",
+      "duration_ms": 0.0296
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "hash_recovered",
+      "duration_ms": 0.003929
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_trial",
+      "duration_ms": 0.015298
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "decrypt_trial",
+      "duration_ms": 0.011175
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_trial",
+      "duration_ms": 0.01057
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "decrypt_trial",
+      "duration_ms": 0.009624
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_trial",
+      "duration_ms": 0.009554
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "decrypt_trial",
+      "duration_ms": 0.009301
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_trial",
+      "duration_ms": 0.009612
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "decrypt_trial",
+      "duration_ms": 0.009261
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_trial",
+      "duration_ms": 0.011448
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "decrypt_trial",
+      "duration_ms": 0.009862
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_trial",
+      "duration_ms": 0.009558
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "decrypt_trial",
+      "duration_ms": 0.009506
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_trial",
+      "duration_ms": 0.009406
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "decrypt_trial",
+      "duration_ms": 0.009043
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_trial",
+      "duration_ms": 0.009004
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "decrypt_trial",
+      "duration_ms": 0.00893
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_trial",
+      "duration_ms": 0.009011
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "decrypt_trial",
+      "duration_ms": 0.008883
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_trial",
+      "duration_ms": 0.008996
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "decrypt_trial",
+      "duration_ms": 0.00875
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_plaintext_bit_variant",
+      "duration_ms": 0.011138
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_key_bit_variant",
+      "duration_ms": 0.011922
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_plaintext_bit_variant",
+      "duration_ms": 0.010442
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_key_bit_variant",
+      "duration_ms": 0.010214
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_plaintext_bit_variant",
+      "duration_ms": 0.00996
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_key_bit_variant",
+      "duration_ms": 0.010898
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_plaintext_bit_variant",
+      "duration_ms": 0.010137
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_key_bit_variant",
+      "duration_ms": 0.011054
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_plaintext_bit_variant",
+      "duration_ms": 0.011351
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_key_bit_variant",
+      "duration_ms": 0.010327
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_plaintext_bit_variant",
+      "duration_ms": 0.00989
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_key_bit_variant",
+      "duration_ms": 0.0101
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_plaintext_bit_variant",
+      "duration_ms": 0.00964
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_key_bit_variant",
+      "duration_ms": 0.009757
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_plaintext_bit_variant",
+      "duration_ms": 0.009296
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_key_bit_variant",
+      "duration_ms": 0.009559
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_plaintext_bit_variant",
+      "duration_ms": 0.009922
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_key_bit_variant",
+      "duration_ms": 0.009734
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_plaintext_bit_variant",
+      "duration_ms": 0.009301
+    },
+    {
+      "ts": "2026-10-30T03:49:56.585+00:00",
+      "operation": "encrypt_key_bit_variant",
+      "duration_ms": 0.009656
+    }
+  ],
+  "ciphertext_base64": "XAwl74EYp6BgyREigCg4SXKdvxjCYGj0EET2oQs9cuX69J7YyErsn/ET4QjDU170bmU0cY8qQA5oUNDMbA8il12J1dGB5SlvTjwuF2uFePj4BWX2vWX9uiDa1Puw7Wkh4vrRUPR5AOMAWbVK9uh01A==",
+  "iv_base64": "j2Wol9c0qmNyQioX5gEOGg==",
   "recovered_plaintext": "SYNTHETIC TRAINING DATA — NOT REAL\nExercise: OP-2824\nLocation: SECTOR-13 (fictional)\nStatus: simulated\n",
   "plaintext_bytes": 105,
   "ciphertext_bytes": 112,
   "trials": 10,
   "timings_ms_median": {
-    "encrypt": 0.008403,
-    "decrypt": 0.008372
+    "encrypt": 0.009556,
+    "decrypt": 0.009281
   },
   "diffusion_one_plaintext_bit": {
     "trials": [
       {
-        "bit_change_pct": 51.228,
-        "hex_character_change_pct": 94.196
+        "bit_change_pct": 49.219,
+        "hex_character_change_pct": 92.411
       },
       {
-        "bit_change_pct": 49.442,
-        "hex_character_change_pct": 95.089
+        "bit_change_pct": 49.33,
+        "hex_character_change_pct": 91.964
       },
       {
-        "bit_change_pct": 50.112,
-        "hex_character_change_pct": 93.304
+        "bit_change_pct": 47.098,
+        "hex_character_change_pct": 89.732
       },
       {
-        "bit_change_pct": 50.781,
-        "hex_character_change_pct": 95.982
-      },
-      {
-        "bit_change_pct": 49.777,
+        "bit_change_pct": 50.0,
         "hex_character_change_pct": 91.518
-      },
-      {
-        "bit_change_pct": 48.996,
-        "hex_character_change_pct": 95.089
-      },
-      {
-        "bit_change_pct": 48.661,
-        "hex_character_change_pct": 94.196
       },
       {
         "bit_change_pct": 49.219,
@@ -49,64 +267,82 @@
       },
       {
         "bit_change_pct": 51.339,
-        "hex_character_change_pct": 94.643
+        "hex_character_change_pct": 94.196
       },
       {
-        "bit_change_pct": 47.098,
-        "hex_character_change_pct": 91.071
+        "bit_change_pct": 49.665,
+        "hex_character_change_pct": 95.982
+      },
+      {
+        "bit_change_pct": 50.446,
+        "hex_character_change_pct": 94.196
+      },
+      {
+        "bit_change_pct": 51.786,
+        "hex_character_change_pct": 95.982
+      },
+      {
+        "bit_change_pct": 48.884,
+        "hex_character_change_pct": 91.964
       }
     ],
     "summary": {
-      "bit_change_pct_median": 49.6095,
-      "hex_character_change_pct_median": 94.196
+      "bit_change_pct_median": 49.4975,
+      "hex_character_change_pct_median": 93.3035
+    },
+    "timings_ms_median": {
+      "encrypt": 0.009941
     }
   },
   "confusion_one_key_bit": {
     "trials": [
       {
-        "bit_change_pct": 52.232,
+        "bit_change_pct": 52.455,
+        "hex_character_change_pct": 94.643
+      },
+      {
+        "bit_change_pct": 48.884,
+        "hex_character_change_pct": 92.411
+      },
+      {
+        "bit_change_pct": 50.112,
+        "hex_character_change_pct": 94.643
+      },
+      {
+        "bit_change_pct": 49.777,
+        "hex_character_change_pct": 94.196
+      },
+      {
+        "bit_change_pct": 50.67,
+        "hex_character_change_pct": 94.196
+      },
+      {
+        "bit_change_pct": 51.897,
+        "hex_character_change_pct": 94.196
+      },
+      {
+        "bit_change_pct": 49.33,
+        "hex_character_change_pct": 94.643
+      },
+      {
+        "bit_change_pct": 51.451,
         "hex_character_change_pct": 95.982
-      },
-      {
-        "bit_change_pct": 47.321,
-        "hex_character_change_pct": 92.857
-      },
-      {
-        "bit_change_pct": 47.991,
-        "hex_character_change_pct": 90.625
       },
       {
         "bit_change_pct": 48.438,
         "hex_character_change_pct": 91.964
       },
       {
-        "bit_change_pct": 53.348,
-        "hex_character_change_pct": 95.982
-      },
-      {
-        "bit_change_pct": 55.022,
-        "hex_character_change_pct": 96.429
-      },
-      {
         "bit_change_pct": 49.219,
-        "hex_character_change_pct": 94.196
-      },
-      {
-        "bit_change_pct": 48.772,
-        "hex_character_change_pct": 93.75
-      },
-      {
-        "bit_change_pct": 51.786,
-        "hex_character_change_pct": 93.304
-      },
-      {
-        "bit_change_pct": 49.107,
         "hex_character_change_pct": 94.643
       }
     ],
     "summary": {
-      "bit_change_pct_median": 49.163,
-      "hex_character_change_pct_median": 93.973
+      "bit_change_pct_median": 49.944500000000005,
+      "hex_character_change_pct_median": 94.4195
+    },
+    "timings_ms_median": {
+      "encrypt": 0.010157
     }
   },
   "metric_definition": "Same key and IV for each comparison. Bit change is Hamming distance over ciphertext bits; character change is positional difference over hexadecimal ciphertext characters. Hex digit values are not plaintext characters. These sample measurements are not cryptographic proofs or guaranteed percentages."

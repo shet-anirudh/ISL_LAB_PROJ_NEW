@@ -21,6 +21,15 @@ SOURCE = "01_Operations/mission_brief.txt"
 TRIALS = 10
 
 
+def _measure(operation, function, records):
+    ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    start = time.perf_counter_ns()
+    value = function()
+    elapsed = time.perf_counter_ns() - start
+    records.append({"ts": ts, "operation": operation, "duration_ms": round(elapsed / 1e6, 6)})
+    return value, elapsed
+
+
 def _changed(original, altered):
     if len(original) != len(altered) or not original:
         raise ValueError("Compare equal, nonempty ciphertexts")
@@ -41,35 +50,43 @@ def run():
     if root != Path.home() / "MILITARY_DATA" or path.is_symlink() or not path.is_file():
         raise ValueError("Only the configured synthetic text sample is allowed")
     original = path.read_bytes()
+    operations = []
+    source_digest, _ = _measure("hash_plaintext", lambda: hashlib.sha256(original).hexdigest(), operations)
     baseline = json.loads((Path(PROJECT_ROOT) / "results" / "baseline_hashes.json").read_text())
-    if hashlib.sha256(original).hexdigest() != baseline["files"][SOURCE]:
+    if source_digest != baseline["files"][SOURCE]:
         raise ValueError("Synthetic text differs from baseline")
     plaintext = original.decode("utf-8")
     key, iv = generate_aes_key(), generate_iv()
-    encrypted = aes_encrypt(original, iv, key)
-    recovered = aes_decrypt(encrypted, iv, key)
+    encrypted, _ = _measure("encrypt", lambda: aes_encrypt(original, iv, key), operations)
+    cipher_digest, _ = _measure("hash_ciphertext", lambda: hashlib.sha256(encrypted).hexdigest(), operations)
+    recovered, _ = _measure("decrypt", lambda: aes_decrypt(encrypted, iv, key), operations)
+    recovered_digest, _ = _measure("hash_recovered", lambda: hashlib.sha256(recovered).hexdigest(), operations)
     if recovered != original:
         raise AssertionError("Text round trip failed")
     encrypt_ns, decrypt_ns = [], []
     for _ in range(TRIALS):
-        start = time.perf_counter_ns()
-        candidate = aes_encrypt(original, iv, key)
-        encrypt_ns.append(time.perf_counter_ns() - start)
-        start = time.perf_counter_ns()
-        if aes_decrypt(candidate, iv, key) != original:
+        candidate, elapsed = _measure("encrypt_trial", lambda: aes_encrypt(original, iv, key), operations)
+        encrypt_ns.append(elapsed)
+        decoded, elapsed = _measure("decrypt_trial", lambda: aes_decrypt(candidate, iv, key), operations)
+        if decoded != original:
             raise AssertionError("AES round trip failed")
-        decrypt_ns.append(time.perf_counter_ns() - start)
+        decrypt_ns.append(elapsed)
 
     diffusion, confusion = [], []
+    diffusion_times, confusion_times = [], []
     for bit in range(TRIALS):
         # Keep key and IV fixed: changing only one plaintext bit isolates
         # diffusion; changing only one key bit isolates confusion.
         changed_text = bytearray(original)
         changed_text[bit // 8] ^= 1 << (bit % 8)
-        diffusion.append(_changed(encrypted, aes_encrypt(bytes(changed_text), iv, key)))
+        variant, elapsed = _measure("encrypt_plaintext_bit_variant", lambda: aes_encrypt(bytes(changed_text), iv, key), operations)
+        diffusion_times.append(elapsed)
+        diffusion.append(_changed(encrypted, variant))
         changed_key = bytearray(key)
         changed_key[bit // 8] ^= 1 << (bit % 8)
-        confusion.append(_changed(encrypted, aes_encrypt(original, iv, bytes(changed_key))))
+        variant, elapsed = _measure("encrypt_key_bit_variant", lambda: aes_encrypt(original, iv, bytes(changed_key)), operations)
+        confusion_times.append(elapsed)
+        confusion.append(_changed(encrypted, variant))
 
     def summary(rows):
         return {field + "_median": statistics.median(row[field] for row in rows)
@@ -79,6 +96,8 @@ def run():
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "algorithm": "AES-256-CBC with PKCS7 padding",
         "source": SOURCE, "plaintext": plaintext,
+        "source_sha256": source_digest, "ciphertext_sha256": cipher_digest,
+        "recovered_sha256": recovered_digest, "operations": operations,
         "ciphertext_base64": base64.b64encode(encrypted).decode("ascii"),
         "iv_base64": base64.b64encode(iv).decode("ascii"),
         "recovered_plaintext": recovered.decode("utf-8"),
@@ -86,8 +105,10 @@ def run():
         "trials": TRIALS,
         "timings_ms_median": {"encrypt": _median_ms(encrypt_ns),
                               "decrypt": _median_ms(decrypt_ns)},
-        "diffusion_one_plaintext_bit": {"trials": diffusion, "summary": summary(diffusion)},
-        "confusion_one_key_bit": {"trials": confusion, "summary": summary(confusion)},
+        "diffusion_one_plaintext_bit": {"trials": diffusion, "summary": summary(diffusion),
+                                        "timings_ms_median": {"encrypt": _median_ms(diffusion_times)}},
+        "confusion_one_key_bit": {"trials": confusion, "summary": summary(confusion),
+                                  "timings_ms_median": {"encrypt": _median_ms(confusion_times)}},
         "metric_definition": "Same key and IV for each comparison. Bit change is "
         "Hamming distance over ciphertext bits; character change is positional "
         "difference over hexadecimal ciphertext characters. Hex digit values "
@@ -101,7 +122,7 @@ def main():
     output = Path(PROJECT_ROOT) / "results" / "text_security.json"
     if output.is_symlink():
         raise ValueError("Refusing to write through symlink")
-    with output.open("x", encoding="utf-8") as stream:
+    with output.open("w", encoding="utf-8") as stream:
         json.dump(result, stream, ensure_ascii=False, indent=2)
         stream.write("\n")
     print(f"PASS: text round trip and {TRIALS} one-bit trials; saved {output}")

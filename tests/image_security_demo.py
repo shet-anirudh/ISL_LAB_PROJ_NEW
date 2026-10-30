@@ -82,21 +82,35 @@ def _rounded(value):
     return round(value, 6) if value is not None and not isinstance(value, str) else value
 
 
+def _measure(operation, function, records):
+    ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    start = time.perf_counter_ns()
+    value = function()
+    elapsed = time.perf_counter_ns() - start
+    records.append({"ts": ts, "operation": operation, "duration_ms": round(elapsed / 1e6, 6)})
+    return value, elapsed
+
+
 def run():
     root = Path(TEST_DATA_DIR)
     source = root / SOURCE
     if root != Path.home() / "MILITARY_DATA" or source.is_symlink() or not source.is_file():
         raise ValueError("Only the configured synthetic image is allowed")
     expected = json.loads((Path(PROJECT_ROOT) / "results" / "baseline_hashes.json").read_text())["files"][SOURCE]
-    if hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+    operations = []
+    file_sha, _ = _measure("hash_source_jpeg", lambda: hashlib.sha256(source.read_bytes()).hexdigest(), operations)
+    if file_sha != expected:
         raise ValueError("Synthetic image differs from baseline")
     with Image.open(source) as input_image:
         image = input_image.convert("RGB")
     width, height = image.size
     original = image.tobytes()
     key, iv = generate_aes_key(), generate_iv()
-    encrypted = aes_encrypt(original, iv, key)
-    recovered = aes_decrypt(encrypted, iv, key)
+    rgb_sha, _ = _measure("hash_rgb", lambda: hashlib.sha256(original).hexdigest(), operations)
+    encrypted, _ = _measure("encrypt", lambda: aes_encrypt(original, iv, key), operations)
+    cipher_sha, _ = _measure("hash_ciphertext", lambda: hashlib.sha256(encrypted).hexdigest(), operations)
+    recovered, _ = _measure("decrypt", lambda: aes_decrypt(encrypted, iv, key), operations)
+    recovered_sha, _ = _measure("hash_recovered", lambda: hashlib.sha256(recovered).hexdigest(), operations)
     if recovered != original:
         raise AssertionError("RGB round trip failed")
     preview = encrypted[:len(original)]
@@ -106,13 +120,12 @@ def run():
     npcr, uaci = npcr_uaci(preview, changed_cipher)
     encrypt_ns, decrypt_ns = [], []
     for _ in range(TRIALS):
-        start = time.perf_counter_ns()
-        candidate = aes_encrypt(original, iv, key)
-        encrypt_ns.append(time.perf_counter_ns() - start)
-        start = time.perf_counter_ns()
-        if aes_decrypt(candidate, iv, key) != original:
+        candidate, elapsed = _measure("encrypt_trial", lambda: aes_encrypt(original, iv, key), operations)
+        encrypt_ns.append(elapsed)
+        decoded, elapsed = _measure("decrypt_trial", lambda: aes_decrypt(candidate, iv, key), operations)
+        if decoded != original:
             raise AssertionError("RGB round trip failed")
-        decrypt_ns.append(time.perf_counter_ns() - start)
+        decrypt_ns.append(elapsed)
     encrypted_error = mse(original, preview)
     recovered_error = mse(original, recovered)
     results_dir = Path(PROJECT_ROOT) / "results"
@@ -126,6 +139,8 @@ def run():
     result = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source": SOURCE, "source_sha256": expected,
+        "rgb_sha256": rgb_sha, "ciphertext_sha256": cipher_sha,
+        "recovered_sha256": recovered_sha, "operations": operations,
         "algorithm": "AES-256-CBC on decoded RGB bytes, PKCS7 padding",
         "image": {"width": width, "height": height, "channels": 3},
         "previews": {name: str((output / filename).relative_to(PROJECT_ROOT))

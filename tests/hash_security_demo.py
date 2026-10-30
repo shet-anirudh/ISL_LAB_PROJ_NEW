@@ -24,6 +24,15 @@ def _digest(data):
     return hashlib.sha256(data).digest()
 
 
+def _measure(operation, payload, records):
+    ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    start = time.perf_counter_ns()
+    value = _digest(payload)
+    elapsed = time.perf_counter_ns() - start
+    records.append({"ts": ts, "operation": operation, "duration_ms": round(elapsed / 1e6, 6)})
+    return value, elapsed
+
+
 def run():
     root = Path(TEST_DATA_DIR)
     path = root / SOURCE
@@ -31,19 +40,19 @@ def run():
         raise ValueError("Only the configured synthetic text is allowed")
     original = path.read_bytes()
     baseline = json.loads((Path(PROJECT_ROOT) / "results" / "baseline_hashes.json").read_text())["files"]
-    target = _digest(original)
+    operations = []
+    target, _ = _measure("hash_source", original, operations)
     if target.hex() != baseline[SOURCE]:
         raise ValueError("Synthetic text differs from baseline")
     timing_ns = []
     for _ in range(TIMING_TRIALS):
-        start = time.perf_counter_ns()
-        _digest(original)
-        timing_ns.append(time.perf_counter_ns() - start)
+        _, elapsed = _measure("hash_trial", original, operations)
+        timing_ns.append(elapsed)
     changed_bits = []
     for bit in range(BIT_TRIALS):
         changed = bytearray(original)
         changed[bit // 8] ^= 1 << (bit % 8)
-        different = _digest(changed)
+        different, _ = _measure("hash_one_bit_variant", changed, operations)
         changed_bits.append(sum((a ^ b).bit_count() for a, b in zip(target, different)))
     preimage_found = second_preimage_found = collision_found = False
     seen = {}
@@ -60,6 +69,7 @@ def run():
             seen[digest] = candidate
     return {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "operations": operations,
         "source": SOURCE, "source_bytes": len(original), "algorithm": "SHA-256",
         "digest_hex": target.hex(),
         "generation_time_ms_median": round(statistics.median(timing_ns) / 1e6, 6),
@@ -89,7 +99,7 @@ def main():
     output = Path(PROJECT_ROOT) / "results" / "hash_security.json"
     if output.is_symlink():
         raise ValueError("Refusing to write through symlink")
-    with output.open("x", encoding="utf-8") as stream:
+    with output.open("w", encoding="utf-8") as stream:
         json.dump(result, stream, indent=2)
         stream.write("\n")
     print(f"PASS: SHA-256 analysis saved to {output}")

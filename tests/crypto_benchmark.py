@@ -31,6 +31,16 @@ def median_ms(samples_ns):
     return round(statistics.median(samples_ns) / 1_000_000, 4)
 
 
+def _measure(name, kind, function, operations):
+    ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    start = time.perf_counter_ns()
+    value = function()
+    elapsed = time.perf_counter_ns() - start
+    operations.append({"ts": ts, "kind": kind, "operation": name,
+                       "duration_ms": round(elapsed / 1e6, 6)})
+    return value, elapsed
+
+
 def benchmark():
     root = Path(TEST_DATA_DIR)
     if not root.is_dir():
@@ -38,7 +48,7 @@ def benchmark():
     public_key = Path(RSA_PUB_KEY_PATH)
     if not public_key.is_file():
         raise FileNotFoundError(public_key)
-    records = {}
+    records, operations = {}, []
     for kind, relative in FILES.items():
         path = root / relative
         data = path.read_bytes()
@@ -47,19 +57,16 @@ def benchmark():
         encrypt_ns, decrypt_ns, wrap_ns = [], [], []
         for _ in range(TRIALS):
             key, iv = generate_aes_key(), generate_iv()
-            start = time.perf_counter_ns()
-            ciphertext = aes_encrypt(data, iv, key)
-            encrypt_ns.append(time.perf_counter_ns() - start)
+            ciphertext, elapsed = _measure("encrypt", kind, lambda: aes_encrypt(data, iv, key), operations)
+            encrypt_ns.append(elapsed)
 
-            start = time.perf_counter_ns()
-            recovered = aes_decrypt(ciphertext, iv, key)
-            decrypt_ns.append(time.perf_counter_ns() - start)
+            recovered, elapsed = _measure("decrypt", kind, lambda: aes_decrypt(ciphertext, iv, key), operations)
+            decrypt_ns.append(elapsed)
             if recovered != data:
                 raise AssertionError(f"AES round trip failed for {relative}")
 
-            start = time.perf_counter_ns()
-            rsa_wrap_key(key, public_key)
-            wrap_ns.append(time.perf_counter_ns() - start)
+            _, elapsed = _measure("wrap_key", kind, lambda: rsa_wrap_key(key, public_key), operations)
+            wrap_ns.append(elapsed)
 
         median_encrypt_s = statistics.median(encrypt_ns) / 1_000_000_000
         median_decrypt_s = statistics.median(decrypt_ns) / 1_000_000_000
@@ -74,7 +81,8 @@ def benchmark():
             "rsa_wrap_median_ms": median_ms(wrap_ns),
         }
     return {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            "trials_per_file": TRIALS, "measurements": records}
+            "trials_per_file": TRIALS, "measurements": records,
+            "operations": operations}
 
 
 def main():
