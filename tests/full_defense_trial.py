@@ -19,7 +19,7 @@ from pathlib import Path
 from watchdog.observers import Observer
 
 from config import HONEYPOT_DIR, LOG_DIR, PROJECT_ROOT, TEST_DATA_DIR
-from victim.containment import kill_process, process_identity, snapshot_filesystem
+from victim.containment import kill_process, log_event, process_identity, snapshot_filesystem
 from victim.honeypot_monitor import DecoyHandler
 
 
@@ -121,6 +121,9 @@ def main():
         for name, expected in baseline.items():
             if hashlib.sha256((source / name).read_bytes()).hexdigest() != expected:
                 raise AssertionError(f"Original dataset changed: {name}")
+        log_event("trial_contained", trial=trial.name, pid=child.pid,
+                  decoy_file=str(decoy_locked[0]), decoy_copies=1,
+                  real_copies=0, baseline_files=len(baseline))
         print(f"PASS: first decoy copy triggered containment of simulator PID {child.pid}")
         print("PASS: zero real encrypted copies; original 20 dataset files match baseline")
         print(f"Trial evidence: {trial}")

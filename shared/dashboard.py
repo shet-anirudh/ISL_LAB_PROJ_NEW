@@ -30,6 +30,82 @@ LOGS = Path(LOG_DIR)
 MAX_LOG_BYTES = 2 * 1024 * 1024
 MAX_EVENTS = 24
 TELEMETRY_PORT = 9083
+DEMO_LOCK = threading.Lock()
+DEMO_STATE = {"status": "idle", "command": "FULL_LAB_SEQUENCE", "detail": "Awaiting Kali demo",
+              "steps": [], "sequence": -1, "run_id": None, "start_local_utc": None}
+DEMO_STEPS = {"Start PCAP capture", "Verified TLS backup", "Contained trial",
+              "Decoy touched and detected", "Registered simulator stopped",
+              "Synthetic PDF transfer", "Verify original dataset", "Isolated restore trial",
+              "Stop PCAP capture", "Analyze and report", "Verify signed evaluation",
+              "Stop capture after failure"}
+
+
+def _demo_snapshot():
+    with DEMO_LOCK:
+        return json.loads(json.dumps(DEMO_STATE))
+
+
+def _record_demo_progress(payload):
+    """Accept progress metadata only, in order, from the authenticated Kali VM."""
+    if (not isinstance(payload, dict) or set(payload) !=
+            {"run_id", "sequence", "status", "detail", "steps", "started", "finished", "trial"}):
+        raise ValueError("Invalid progress record")
+    run_id, sequence, status, steps = (payload[k] for k in ("run_id", "sequence", "status", "steps"))
+    if (not isinstance(run_id, str) or len(run_id) != 24 or
+            any(c not in "0123456789abcdef" for c in run_id) or
+            type(sequence) is not int or sequence < 0 or sequence > 100 or
+            status not in {"running", "completed", "failed"} or
+            not isinstance(steps, list) or len(steps) > len(DEMO_STEPS)):
+        raise ValueError("Invalid demo state")
+    for step in steps:
+        if (not isinstance(step, dict) or set(step) -
+                {"name", "status", "detail", "duration_ms", "started_utc", "finished_utc"} or
+                step.get("name") not in DEMO_STEPS or
+                step.get("status") not in {"running", "completed", "failed"} or
+                not isinstance(step.get("detail"), str) or len(step["detail"]) > 180):
+            raise ValueError("Invalid demo step")
+    for name in ("detail", "started", "finished", "trial"):
+        if payload[name] is not None and (not isinstance(payload[name], str) or len(payload[name]) > 220):
+            raise ValueError("Invalid demo metadata")
+    with DEMO_LOCK:
+        if run_id != DEMO_STATE["run_id"]:
+            if sequence != 0 or status != "running" or steps:
+                raise ValueError("New demo must start at sequence zero")
+            start_local = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        else:
+            if sequence <= DEMO_STATE["sequence"]:
+                raise ValueError("Out-of-order demo update")
+            start_local = DEMO_STATE["start_local_utc"]
+        DEMO_STATE.clear()
+        DEMO_STATE.update(payload, command="FULL_LAB_SEQUENCE", start_local_utc=start_local)
+
+
+def _trial_evidence():
+    state = _demo_snapshot()
+    started = state.get("start_local_utc")
+    if not started:
+        return {"decoy": None, "stop": None, "confirmation": None, "trial": None}
+    def after_start(event):
+        try:
+            return datetime.fromisoformat(str(event.get("ts", "")).replace("Z", "+00:00")) >= \
+                datetime.fromisoformat(started.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    trial = state.get("trial")
+    decoys = [e for e in _events("honeypot.log") if e.get("event") == "decoy_touched" and
+              e.get("action") == "created" and str(e.get("file", "")).endswith(".locked") and
+              "/results/simtrial-" in str(e.get("file", "")) and after_start(e) and
+              (not trial or f"/{trial}/" in str(e.get("file", "")))]
+    decoy = decoys[-1] if decoys else None
+    if not trial and decoy:
+        trial = next((part for part in Path(decoy["file"]).parts if part.startswith("simtrial-")), None)
+    confirms = [e for e in _events("containment.log") if e.get("event") == "trial_contained" and
+                e.get("trial") == trial and after_start(e)]
+    confirmation = confirms[-1] if confirms else None
+    stops = [e for e in _events("containment.log") if e.get("event") == "process_killed" and
+             confirmation and e.get("pid") == confirmation.get("pid") and after_start(e)]
+    return {"trial": trial, "decoy": decoy, "stop": stops[-1] if stops else None,
+            "confirmation": confirmation}
 
 
 class ActionController:
@@ -45,7 +121,7 @@ class ActionController:
 
     def status(self):
         with self.lock:
-            return dict(self.state)
+            return json.loads(json.dumps(self.state))
 
     def start(self, command):
         if command not in self.ALLOWED:
@@ -58,7 +134,11 @@ class ActionController:
             self.state = {"status": "running", "command": command,
                           "detail": "Running full lab sequence" if command == "FULL_LAB_SEQUENCE"
                           else "Running local analysis" if command in {"ANALYZE_PCAP", "GENERATE_SIGNATURE", "VERIFY_SIGNATURE"}
-                          else "Waiting for the victim lab agent", "started": _now(), "steps": []}
+                          else "Waiting for the victim lab agent", "started": _now(), "steps": [],
+                          "finished": None, "trial": None,
+                          "run_id": secrets.token_hex(12) if command == "FULL_LAB_SEQUENCE" else None,
+                          "sequence": 0 if command == "FULL_LAB_SEQUENCE" else None,
+                          "sync": "pending" if command == "FULL_LAB_SEQUENCE" else None}
         threading.Thread(target=self._run, args=(command,), daemon=True).start()
         return self.status()
 
@@ -79,34 +159,71 @@ class ActionController:
             status, detail = "failed", str(exc)[:220]
         with self.lock:
             self.state.update(status=status, detail=detail, finished=_now())
+        self._broadcast()
+
+    def _broadcast(self, *, initial=False, required=False):
+        with self.lock:
+            if self.state.get("command") != "FULL_LAB_SEQUENCE":
+                return
+            if not initial:
+                self.state["sequence"] += 1
+            payload = {key: self.state.get(key) for key in
+                       ("run_id", "sequence", "status", "detail", "steps", "started", "finished", "trial")}
+            payload = json.loads(json.dumps(payload))
+        try:
+            _post_victim_demo(payload)
+            sync = "connected"
+        except (OSError, ValueError, ssl.SSLError) as exc:
+            sync = "unavailable: " + str(exc)[:100]
+            if required:
+                raise RuntimeError("Start the Ubuntu dashboard before the honeypot demo") from exc
+        with self.lock:
+            self.state["sync"] = sync
 
     def _step(self, label, operation):
         with self.lock:
-            self.state["steps"].append({"name": label, "status": "running", "detail": "In progress"})
+            self.state["steps"].append({"name": label, "status": "running", "detail": "In progress",
+                                        "started_utc": _now()})
             self.state["detail"] = label
             index = len(self.state["steps"]) - 1
+        self._broadcast()
         started = time.perf_counter_ns()
         try:
             result = operation()
         except Exception as exc:
             with self.lock:
                 self.state["steps"][index].update(status="failed", detail=str(exc)[:180],
-                                                  duration_ms=round((time.perf_counter_ns()-started)/1e6, 3))
+                                                  duration_ms=round((time.perf_counter_ns()-started)/1e6, 3),
+                                                  finished_utc=_now())
+            self._broadcast()
             raise
         with self.lock:
             self.state["steps"][index].update(status="completed", detail=str(result)[:180],
-                                              duration_ms=round((time.perf_counter_ns()-started)/1e6, 3))
+                                              duration_ms=round((time.perf_counter_ns()-started)/1e6, 3),
+                                              finished_utc=_now())
+        self._broadcast()
+        if self.state.get("command") == "FULL_LAB_SEQUENCE":
+            time.sleep(0.55)  # Let both screens present each verified stage.
         return result
 
     def _full_sequence(self):
         if self.capture is None:
             raise RuntimeError("Kali dashboard capture control is unavailable")
+        self._broadcast(initial=True, required=True)
         started = False
         try:
             name = self._step("Start PCAP capture", lambda: self.capture.start()["file"])
             started = True
             self._step("Verified TLS backup", lambda: self._remote("RUN_BACKUP"))
-            self._step("Contained trial", lambda: self._remote("START_ENCRYPT"))
+            trial_result = self._step("Contained trial", lambda: self._remote("START_ENCRYPT"))
+            trial = trial_result.rsplit(" ", 1)[-1]
+            if not trial.startswith("simtrial-"):
+                raise RuntimeError("Victim did not return a synthetic trial ID")
+            with self.lock:
+                self.state["trial"] = trial
+            self._broadcast()
+            self._step("Decoy touched and detected", lambda: self._confirm_trial_evidence("decoy", trial))
+            self._step("Registered simulator stopped", lambda: self._confirm_trial_evidence("stop", trial))
             self._step("Synthetic PDF transfer", lambda: self._remote("START_EXFIL"))
             self._step("Verify original dataset", lambda: self._remote("VERIFY_DATASET"))
             self._step("Isolated restore trial", lambda: self._remote("RESTORE_TRIAL"))
@@ -122,6 +239,21 @@ class ActionController:
                 except Exception:
                     pass
             raise
+
+    @staticmethod
+    def _confirm_trial_evidence(kind, trial):
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            status = _remote_demo_status()
+            evidence = status.get("evidence", {}) if status else {}
+            record = evidence.get(kind)
+            if evidence.get("trial") == trial and isinstance(record, dict):
+                if kind == "stop" and not evidence.get("confirmation"):
+                    raise RuntimeError("Process stop is not linked to the trial")
+                return (f"{trial}: decoy created at {record.get('ts')}" if kind == "decoy" else
+                        f"{trial}: registered PID {record.get('pid')} stopped at {record.get('ts')}")
+            time.sleep(0.1)
+        raise RuntimeError(f"No confirmed {kind} event for {trial}")
 
     def _analyze(self, capture=None):
         if capture is None:
@@ -602,16 +734,45 @@ def _token():
                     hashlib.sha256).hexdigest()
 
 
+def _telemetry_opener():
+    cert = ROOT / "keys" / "backup.crt"
+    context = ssl.create_default_context(cafile=str(cert))
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return build_opener(ProxyHandler({}), HTTPSHandler(context=context))
+
+
+def _post_victim_demo(payload):
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    if len(body) > 8192:
+        raise ValueError("Demo progress exceeds the telemetry limit")
+    request = Request(f"https://{VICTIM_IP}:{TELEMETRY_PORT}/api/demo/progress", data=body,
+                      headers={"X-ISLab-Telemetry": _token(), "Content-Type": "application/json"},
+                      method="POST")
+    with _telemetry_opener().open(request, timeout=1.5) as response:
+        if response.status != 202:
+            raise ValueError("Victim did not accept demo progress")
+
+
+def _remote_demo_status():
+    try:
+        request = Request(f"https://{VICTIM_IP}:{TELEMETRY_PORT}/api/demo/status",
+                          headers={"X-ISLab-Telemetry": _token()})
+        with _telemetry_opener().open(request, timeout=1.5) as response:
+            body = response.read(16 * 1024 + 1)
+        if len(body) > 16 * 1024:
+            return None
+        data = json.loads(body)
+        return data if isinstance(data, dict) and isinstance(data.get("evidence"), dict) else None
+    except (OSError, ValueError, ssl.SSLError):
+        return None
+
+
 def _remote_victim():
     """Fetch read-only victim telemetry with pinned TLS and a shared token."""
-    cert = ROOT / "keys" / "backup.crt"
     try:
-        context = ssl.create_default_context(cafile=str(cert))
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context))
         request = Request(f"https://{VICTIM_IP}:{TELEMETRY_PORT}/api/status",
                           headers={"X-ISLab-Telemetry": _token()})
-        with opener.open(request, timeout=1.5) as response:
+        with _telemetry_opener().open(request, timeout=1.5) as response:
             raw = response.read(256 * 1024 + 1)
         if len(raw) > 256 * 1024:
             return None
@@ -716,7 +877,9 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin:18px 0}.chart{border:1px solid #294059;border-radius:12px;background:#0d1b2b;padding:15px;min-width:0}.chart h3{font-size:14px;margin:0 0 12px}.chart svg{display:block;width:100%;height:auto;overflow:visible}.chart small{color:#9badbf}.legend{display:flex;gap:14px;flex-wrap:wrap;color:#b9cddd;font-size:12px;margin-top:9px}.legend span:before{content:'●';color:var(--swatch);margin-right:5px}.process-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.process{background:#10263a;border:1px solid #294059;padding:15px;border-radius:12px}.process strong{display:block;margin-bottom:8px;color:#65dec2}.table-wrap{overflow:auto}.table-wrap table{min-width:650px}.insight{border-left:3px solid #49c9ad;padding:12px 15px;background:#102b38;margin:15px 0;color:#c2dae5}.signature-value{word-break:break-all;font-family:ui-monospace,monospace;line-height:1.6}.status-good{color:#65dec2}.status-warn{color:#ffba83}
 .report-list{display:flex;flex-wrap:wrap;gap:9px;margin:0 0 18px}.report-list button{font:inherit;cursor:pointer;border:1px solid #386079;background:#183149;color:#c4dbe9;border-radius:9px;padding:8px 11px}.report-list button[aria-selected="true"]{border-color:#49c9ad;background:#24645e;color:#fff}
 .sequence-steps{padding-left:22px;color:#bad0dc;font-size:13px}.sequence-steps li{padding:5px 0}.sequence-steps li[data-status="completed"]{color:#65dec2}.sequence-steps li[data-status="failed"]{color:#ff9b83}
+.demo-stage{border:1px solid #276568;background:radial-gradient(circle at 95% 0,#24566977,transparent 46%),linear-gradient(135deg,#152b41,#10232f);border-radius:18px;padding:23px;margin:18px 0;box-shadow:0 18px 38px #06111f88}.demo-top{display:flex;align-items:center;justify-content:space-between;gap:20px}.demo-top h3{font-size:23px;margin:6px 0}.demo-kicker{color:#65dec2;text-transform:uppercase;letter-spacing:.15em;font-size:11px;font-weight:750}.demo-indicator{padding:8px 12px;border:1px solid #4d7185;border-radius:30px;font-size:12px;background:#162b3e;white-space:nowrap}.demo-indicator[data-status="running"]{color:#ffe0a6;border-color:#dfa950;box-shadow:0 0 15px #dda65055}.demo-indicator[data-status="completed"]{color:#65dec2;border-color:#49c9ad}.demo-indicator[data-status="failed"]{color:#ff9b83;border-color:#e46f65}.demo-progress-track{height:11px;border-radius:10px;background:#071725;overflow:hidden;margin:22px 0 8px}.demo-progress-fill{height:100%;width:0;background:linear-gradient(90deg,#37c5ad,#7ce5c8);transition:width .5s}.demo-flow{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:16px 0}.demo-flow span{text-align:center;border:1px solid #314a5f;border-radius:9px;padding:10px 5px;font-size:12px;color:#abc2d2;background:#10263a}.demo-flow span[data-active="true"]{border-color:#53d6bf;color:#eafff7;background:#1b5551}.demo-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:20px 0}.demo-kpi{padding:14px;border:1px solid #345066;background:#0c2032;border-radius:12px;min-width:0}.demo-kpi strong{display:block;font-size:17px;color:#f0f7fc;margin-top:8px;overflow-wrap:anywhere}.demo-kpi[data-confirmed="true"]{border-color:#49c9ad}.demo-timeline{display:grid;gap:9px;margin:20px 0}.demo-step{display:grid;grid-template-columns:36px 1fr;gap:12px;align-items:start;border:1px solid #2b4054;border-radius:11px;background:#10263a;padding:12px}.demo-step[data-status="completed"]{border-color:#356f68}.demo-step[data-status="failed"]{border-color:#a55453}.demo-step[data-status="running"]{border-color:#d2a458;box-shadow:0 0 15px #dda65030}.demo-step .badge{width:32px;height:32px;display:grid;place-items:center;border-radius:50%;background:#24455a;color:#d8ecfa;font-size:13px;font-weight:700}.demo-step[data-status="completed"] .badge{background:#1e7164}.demo-step[data-status="failed"] .badge{background:#934947}.demo-step strong{display:block;font-size:14px}.demo-step small{display:block;color:#9badbf;overflow-wrap:anywhere;margin-top:4px}.demo-meta{font-size:12px;color:#a9bdcf;overflow-wrap:anywhere}.demo-action{font-size:15px;padding:12px 19px;background:#1d8274;border-color:#58d9be;color:white}.demo-action:hover:not(:disabled){background:#289a89}
 @media(max-width:850px){.app-shell{grid-template-columns:1fr}.tabs{position:static;max-height:none;display:flex;flex-direction:row;overflow-x:auto;white-space:nowrap;padding:8px}.tabs button{width:auto;flex:none}.tabs .nav-label{display:none}.cards{grid-template-columns:repeat(2,1fr)}.grid,.chart-grid,.process-grid{grid-template-columns:1fr}.wide{grid-column:auto}}@media(max-width:520px){.cards{grid-template-columns:1fr 1fr}.card{padding:14px}.value{font-size:27px}main{padding:20px 14px}.pill{display:none}}
+@media(max-width:650px){.demo-kpis{grid-template-columns:repeat(2,1fr)}.demo-flow{grid-template-columns:repeat(3,1fr)}.demo-top{align-items:start;flex-direction:column}}
 </style></head><body><main>
 <header><div><div class="eyebrow">IS Lab · Synthetic Environment</div><h1 id="title">Dashboard</h1><div class="muted" id="updated">Loading local evidence…</div></div><span class="pill" id="mode-pill">LAB VM</span></header>
 <div class="app-shell"><nav class="tabs" aria-label="Dashboard sections" id="tabs">
@@ -743,7 +906,13 @@ main{max-width:1240px;margin:auto;padding:35px 25px 65px}header{display:flex;jus
 <button class="action-button" data-capture="stop">Stop PCAP capture</button></div>
 <div class="action-status" id="capture-status" role="status">No dashboard capture started.</div>
 <div class="action-status" id="action-status" role="status">No action run yet.</div></section></div>
-<div class="tab-view" id="tab-honeypot" hidden><section class="panel"><h2>Honeypot monitoring demo</h2><p class="muted">The simulator writes encrypted copies into a disposable trial. Its first decoy event triggers containment of its registered PID. The original dataset is verified after the run.</p><div id="security-honeypot"></div><div id="demo-control" hidden><p class="insight">Run the full guided sequence: capture, verified backup, contained trial, encrypted transfer, dataset check, isolated restore, PCAP analysis, report, and signature verification. Keep the victim dashboard and armed C2 agent running.</p><button class="action-button" data-action="FULL_LAB_SEQUENCE">Run entire synthetic demo</button><div class="action-status" id="demo-status" role="status">No demo run yet.</div><ol id="sequence-steps" class="sequence-steps"></ol></div><h3>Recent decoy and containment events</h3><div id="honeypot-events"></div></section></div>
+<div class="tab-view" id="tab-honeypot" hidden><section class="panel"><h2>Honeypot monitoring demo</h2><p class="muted">Kali starts the fixed synthetic sequence. Both dashboards show verified progress; Ubuntu displays its own decoy and containment evidence. Original MILITARY_DATA is checked after the trial.</p>
+<div class="demo-stage"><div class="demo-top"><div><div class="demo-kicker">Live lab demonstration</div><h3 id="demo-title">Ready to observe</h3><div class="demo-meta" id="demo-subtitle">Waiting for a run</div></div><span class="demo-indicator" id="demo-indicator">IDLE</span></div>
+<div class="demo-progress-track" role="progressbar" aria-label="Demo progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="demo-progress"><div class="demo-progress-fill" id="demo-fill"></div></div><div class="demo-meta" id="demo-count">0 stages completed</div>
+<div class="demo-flow" id="demo-flow"><span>Prepare</span><span>Synthetic attack</span><span>Decoy &amp; stop</span><span>Recover</span><span>Investigate</span></div>
+<div class="demo-kpis" id="demo-kpis"></div><div id="demo-control" hidden><p class="measure-note">Start Ubuntu's dashboard and armed C2 agent first. This control runs only fixed synthetic actions.</p><button class="action-button demo-action" data-action="FULL_LAB_SEQUENCE">Start honeypot test</button></div>
+<div class="action-status" id="demo-status" role="status">No demo run yet.</div><div class="demo-timeline" id="demo-steps"></div></div>
+<div id="security-honeypot"></div><h3>Recent decoy and containment events</h3><div id="honeypot-events"></div></section></div>
 <div class="tab-view" id="tab-text" hidden><section class="panel"><h2>Plaintext and ciphertext</h2><div id="security-text"></div></section></div>
 <div class="tab-view" id="tab-avalanche" hidden><section class="panel"><h2>Avalanche effect / diffusion</h2><div id="security-avalanche"></div></section></div>
 <div class="tab-view" id="tab-confusion" hidden><section class="panel"><h2>Confusion</h2><div id="security-confusion"></div></section></div>
@@ -765,6 +934,7 @@ function showTab(name){
   activeTab=name;
   for(const button of document.querySelectorAll('#tabs button'))button.setAttribute('aria-selected',String(button.dataset.tab===name));
   for(const pane of document.querySelectorAll('.tab-view'))pane.hidden=pane.id!=='tab-'+name;
+  if(name==='honeypot')refreshDemo();
 }
 for(const button of document.querySelectorAll('#tabs button'))button.addEventListener('click',()=>showTab(button.dataset.tab));
 function el(tag,cls,content){const node=document.createElement(tag);if(cls)node.className=cls;if(content!==undefined)node.textContent=String(content);return node}
@@ -830,6 +1000,47 @@ function operationDetails(parent,records){
   if(!Array.isArray(records)||!records.length){parent.append(el('p','measure-note','Individual operation timestamps were not stored in this older result. Regenerate this synthetic analysis to populate them.'));return}
   const details=el('details','');details.append(el('summary','',`${records.length} timestamped operations · inspect individual trials`));
   table(details,['Started (UTC)','Operation','Duration (ms)'],records.map(r=>[r.ts||'—',r.operation||'—',number(r.duration_ms,6)]));parent.append(details);
+}
+function renderDemo(result){
+  const state=result.demo||{},steps=state.command==='FULL_LAB_SEQUENCE'?(state.steps||[]):[],e=result.evidence||{};
+  const done=steps.filter(s=>s.status==='completed').length,pct=Math.min(100,Math.round(done/11*100));
+  $('demo-fill').style.width=pct+'%';$('demo-progress').setAttribute('aria-valuenow',String(pct));
+  $('demo-count').textContent=done+' of 11 verified stages completed';
+  $('demo-indicator').textContent=String(state.status||'idle').toUpperCase();
+  $('demo-indicator').dataset.status=state.status||'idle';
+  $('demo-title').textContent=state.status==='running'?'Demo in progress':state.status==='completed'?'Defense demonstrated':state.status==='failed'?'Demo stopped at a failed stage':'Ready to observe';
+  $('demo-subtitle').textContent=(state.trial||'No current trial')+' · '+(state.started||'Start from Kali')+' UTC';
+  const sync=result.telemetry_connected===false?' · Victim telemetry unavailable':state.sync&&state.sync!=='connected'?' · Sync '+state.sync:'';
+  $('demo-status').textContent=(state.detail||'Waiting for a run')+sync;
+  const kpis=$('demo-kpis');kpis.replaceChildren();
+  for(const [label,value,confirmed] of [
+    ['Decoy touched',e.decoy?'DETECTED':'Awaiting evidence',!!e.decoy],
+    ['Registered PID',e.stop&&e.confirmation?'STOPPED · '+e.stop.pid:'Awaiting evidence',!!(e.stop&&e.confirmation)],
+    ['Real trial copies',e.confirmation?String(e.confirmation.real_copies):'Unknown',!!e.confirmation&&e.confirmation.real_copies===0],
+    ['Original dataset',e.confirmation?e.confirmation.baseline_files+' files verified':'Awaiting check',!!e.confirmation&&e.confirmation.baseline_files===20]]){
+    const card=el('div','demo-kpi');card.dataset.confirmed=String(confirmed);card.append(el('div','label',label),el('strong','',value));kpis.append(card);
+  }
+  const flow=$('demo-flow').children;
+  const stages=[['Start PCAP capture','Verified TLS backup'],['Contained trial'],['Decoy touched and detected','Registered simulator stopped'],
+    ['Synthetic PDF transfer','Verify original dataset','Isolated restore trial'],['Stop PCAP capture','Analyze and report','Verify signed evaluation']];
+  stages.forEach((names,i)=>flow[i].dataset.active=String(steps.some(s=>names.includes(s.name))));
+  const list=$('demo-steps');list.replaceChildren();
+  if(!steps.length){list.append(el('p','muted','Start the test on Kali to see each verified stage appear on both VMs.'));return}
+  steps.forEach((step,index)=>{const card=el('div','demo-step');card.dataset.status=step.status;
+    const glyph=step.status==='completed'?'✓':step.status==='failed'?'!':String(index+1);
+    const details=el('div','');details.append(el('strong','',step.name),el('small','',step.detail||''));
+    details.append(el('small','',[(step.started_utc||'Time unavailable')+' UTC',
+      typeof step.duration_ms==='number'?step.duration_ms.toFixed(3)+' ms':step.status].join(' · ')));
+    card.append(el('span','badge',glyph),details);list.append(card)});
+}
+let demoRequestPending=false;
+async function refreshDemo(){
+  if(demoRequestPending||activeTab!=='honeypot')return;
+  demoRequestPending=true;
+  try{const response=await fetch('/api/demo/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);
+    renderDemo(await response.json());
+  }catch(error){$('demo-status').textContent='Live demo status unavailable: '+error.message}
+  finally{demoRequestPending=false}
 }
 function renderReports(items){
   const root=$('reports');root.replaceChildren();
@@ -1062,16 +1273,13 @@ async function refreshAction(){
   try{
     const response=await fetch('/api/action/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);
     const state=await response.json();const summary=(state.command||'Lab controls')+' · '+state.status+' · '+state.detail;
-    $('action-status').textContent=summary;$('demo-status').textContent=summary;$('signature-status').textContent=summary;
+    $('action-status').textContent=summary;$('signature-status').textContent=summary;
     fullSequenceRunning=state.command==='FULL_LAB_SEQUENCE'&&state.status==='running';
-    const progress=$('sequence-steps');progress.replaceChildren();
-    for(const step of state.steps||[]){const item=el('li','',step.name+' · '+step.status+' · '+step.detail+
-      (typeof step.duration_ms==='number'?' · '+step.duration_ms.toFixed(3)+' ms':''));item.dataset.status=step.status;progress.append(item)}
     for(const button of document.querySelectorAll('[data-action]'))button.disabled=state.status==='running'||(button.dataset.action==='ANALYZE_PCAP'&&captureRunning);
     if(['ANALYZE_PCAP','FULL_LAB_SEQUENCE','GENERATE_SIGNATURE','VERIFY_SIGNATURE'].includes(state.command)&&state.status==='completed'&&state.finished!==lastReportAction){
       lastReportAction=state.finished;selectedReport=null;await refresh();
     }
-  }catch(error){$('action-status').textContent='Action status unavailable: '+error.message;$('demo-status').textContent=$('action-status').textContent;$('signature-status').textContent=$('action-status').textContent}
+  }catch(error){$('action-status').textContent='Action status unavailable: '+error.message;$('signature-status').textContent=$('action-status').textContent}
 }
 let lastReportAction=null;
 let captureRunning=false;
@@ -1105,23 +1313,26 @@ for(const button of document.querySelectorAll('[data-action]'))button.addEventLi
       method:'POST',headers:{'X-ISLab-Action-Token':ACTION_TOKEN}
     });
     const result=await response.json();if(!response.ok)throw Error(result.error||'HTTP '+response.status);
-    await refreshAction();
+    await refreshAction();await refreshDemo();
   }catch(error){$('action-status').textContent='Could not start action: '+error.message;$('demo-status').textContent=$('action-status').textContent;$('signature-status').textContent=$('action-status').textContent;button.disabled=false}
 });
-refresh();refreshAction();refreshCapture();setInterval(refresh,4000);setInterval(refreshAction,2000);setInterval(refreshCapture,2000);
+refresh();refreshAction();refreshCapture();setInterval(refresh,4000);setInterval(refreshAction,2000);setInterval(refreshCapture,2000);setInterval(refreshDemo,850);
 </script></body></html>'''
 
 
 def _telemetry_server():
     class TelemetryHandler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if (urlsplit(self.path).path != "/api/status" or
+            path = urlsplit(self.path).path
+            if (path not in {"/api/status", "/api/demo/status"} or
                     self.client_address[0] != ATTACKER_IP or
                     not hmac.compare_digest(self.headers.get("X-ISLab-Telemetry", ""), _token())):
                 self.send_error(403)
                 return
             try:
-                body = json.dumps(_victim()).encode("utf-8")
+                value = _victim() if path == "/api/status" else {
+                    "demo": _demo_snapshot(), "evidence": _trial_evidence()}
+                body = json.dumps(value).encode("utf-8")
             except (OSError, ValueError):
                 self.send_error(500)
                 return
@@ -1132,6 +1343,27 @@ def _telemetry_server():
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self):
+            if (urlsplit(self.path).path != "/api/demo/progress" or
+                    self.client_address[0] != ATTACKER_IP or
+                    not hmac.compare_digest(self.headers.get("X-ISLab-Telemetry", ""), _token()) or
+                    self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json"):
+                self.send_error(403)
+                return
+            raw_size = self.headers.get("Content-Length", "")
+            if not raw_size.isdecimal() or not 0 < int(raw_size) <= 8192:
+                self.send_error(413)
+                return
+            try:
+                _record_demo_progress(json.loads(self.rfile.read(int(raw_size))))
+            except (ValueError, UnicodeError):
+                self.send_error(400)
+                return
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
 
         def log_message(self, format, *args):
             pass
@@ -1188,6 +1420,13 @@ def serve(role, port):
                 except (OSError, ValueError) as exc:
                     self.send_error(500, f"Could not read dashboard data: {exc}")
                     return
+                kind = "application/json; charset=utf-8"
+            elif path == "/api/demo/status":
+                demo = controller.status() if controller is not None else _demo_snapshot()
+                remote = _remote_demo_status() if controller is not None else None
+                body = json.dumps({"demo": demo, "evidence": remote.get("evidence") if remote else
+                                   (_trial_evidence() if controller is None else None),
+                                   "telemetry_connected": bool(remote) if controller is not None else True}).encode("utf-8")
                 kind = "application/json; charset=utf-8"
             elif controller is not None and path == "/api/action/status":
                 body, kind = json.dumps(controller.status()).encode("utf-8"), "application/json; charset=utf-8"
